@@ -1002,6 +1002,7 @@ dependencies = [
     { name = "pyproj" },
     { name = "scikit-learn" },
     { name = "shapely" },
+    { name = "skops" },
 ]
 
 [package.dev-dependencies]
@@ -1025,6 +1026,7 @@ requires-dist = [
     { name = "pyproj", specifier = "==3.7.0" },
     { name = "scikit-learn", specifier = "==1.6.0" },
     { name = "shapely", specifier = "==2.0.6" },
+    { name = "skops", specifier = "==0.16.0" },
 ]
 
 [package.metadata.requires-dev]

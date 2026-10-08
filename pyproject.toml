@@ -17,6 +17,7 @@ dependencies = [
     "pyarrow==18.1.0",
     "matplotlib==3.9.3",
     "mlflow-skinny==3.16.1",
+    "skops==0.16.0",  # safe model serialisation instead of pickle
     "boto3==1.35.81",
     "psycopg[binary]==3.2.3",
 ]
@@ -42,4 +43,8 @@ packages = ["src/pipesense"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
-filterwarnings = ["ignore:datetime.datetime.utcnow:DeprecationWarning:botocore"]
+filterwarnings = [
+    "ignore:datetime.datetime.utcnow:DeprecationWarning:botocore",
+    "ignore::DeprecationWarning:matplotlib",
+    "ignore::pyparsing.warnings.PyparsingDeprecationWarning",
+]
