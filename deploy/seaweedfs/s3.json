@@ -1,0 +1,9 @@
+{
+  "identities": [
+    {
+      "name": "pipesense",
+      "credentials": [{"accessKey": "pipesense", "secretKey": "pipesense-local-secret"}],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

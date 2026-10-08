@@ -1,0 +1,127 @@
+# Same image, two environments, selected by configuration only (config/dev.env vs config/prod.env).
+#
+#   dev:  local volume as artifact store, MLflow on sqlite, file-based job status
+#   prod: S3 API (SeaweedFS), MLflow on Postgres with artifacts in S3
+#
+# Only dev services have a `build:` section. Prod services reference pipesense:${IMAGE_TAG}
+# and never build: a change reaches prod-like by promoting an image tag already tested in dev.
+name: pipesense
+
+x-pipeline-image: &pipeline-image
+  image: pipesense:${IMAGE_TAG:-dev}
+  pull_policy: never
+
+services:
+  # ------------------------------------------------------------------ dev
+  pipeline-dev:
+    <<: *pipeline-image
+    profiles: [dev]
+    build:
+      context: .
+      target: runtime
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+        IMAGE_TAG: ${IMAGE_TAG:-dev}
+    env_file: config/dev.env
+    volumes:
+      - ./data/raw:/data/raw:ro      # utility exports in
+      - dev-runs:/data/runs          # stage outputs, markers, predictions
+    depends_on:
+      mlflow-dev: {condition: service_healthy}
+
+  mlflow-dev:
+    profiles: [dev]
+    image: ghcr.io/mlflow/mlflow:v3.16.1
+    command: >-
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --artifacts-destination /mlflow/artifacts
+      --allowed-hosts mlflow-dev:5000,localhost:*,127.0.0.1:*
+    environment:
+      MLFLOW_DISABLE_TELEMETRY: "true"
+    volumes: [mlflow-dev:/mlflow]
+    ports: ["5000:5000"]
+    healthcheck: &mlflow-health
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  test:
+    profiles: [test]
+    image: pipesense-test:${IMAGE_TAG:-dev}
+    pull_policy: never
+    build:
+      context: .
+      target: test
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+        IMAGE_TAG: ${IMAGE_TAG:-dev}
+
+  # ------------------------------------------------------------------ prod-like
+  postgres:
+    profiles: [prod]
+    image: postgres:16.4-bookworm
+    environment:
+      POSTGRES_USER: pipesense
+      POSTGRES_PASSWORD: local-only        # local miniature; real deployments use Secrets Manager
+      POSTGRES_DB: mlflow
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./deploy/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U pipesense -d pipesense"]  # TCP: not ready until init scripts finish
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  s3:
+    profiles: [prod]
+    image: chrislusf/seaweedfs:4.44        # S3 API; MinIO stopped publishing images in 2026
+    command: server -ip=s3 -ip.bind=0.0.0.0 -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -master.volumeSizeLimitMB=256
+    volumes:
+      - s3-data:/data
+      - ./deploy/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
+
+  s3-init:                                  # one-shot: create buckets, load raw exports
+    <<: *pipeline-image
+    profiles: [prod]
+    env_file: config/prod.env
+    command: ["seed", "--source", "/seed/raw", "--extra-bucket", "mlflow-artifacts"]
+    volumes: ["./data/raw:/seed/raw:ro"]
+    depends_on: [s3]                        # seed retries until the S3 API answers
+
+  mlflow-prod:
+    profiles: [prod]
+    build: deploy/mlflow
+    image: pipesense-mlflow:3.16.1
+    command: >-
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri postgresql+psycopg2://pipesense:local-only@postgres:5432/mlflow
+      --artifacts-destination s3://mlflow-artifacts/
+      --allowed-hosts mlflow-prod:5000,localhost:*,127.0.0.1:*
+    environment:
+      MLFLOW_DISABLE_TELEMETRY: "true"
+      MLFLOW_S3_ENDPOINT_URL: http://s3:8333
+      AWS_ACCESS_KEY_ID: pipesense
+      AWS_SECRET_ACCESS_KEY: pipesense-local-secret
+      AWS_DEFAULT_REGION: us-east-1
+    ports: ["5001:5000"]
+    healthcheck: *mlflow-health
+    depends_on:
+      postgres: {condition: service_healthy}
+      s3-init: {condition: service_completed_successfully}
+
+  pipeline-prod:                            # ad-hoc commands: train, promote, models, run score
+    <<: *pipeline-image
+    profiles: [prod]
+    env_file: config/prod.env
+    depends_on:
+      mlflow-prod: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+
+volumes:
+  dev-runs:
+  mlflow-dev:
+  pg-data:
+  s3-data:

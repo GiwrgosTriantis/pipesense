@@ -95,22 +95,43 @@ def cmd_models(args, settings: Settings) -> int:
 
 
 def cmd_seed(args, settings: Settings) -> int:
-    """Copy local raw exports into the artifact store (creates the bucket on S3-compatible stores)."""
+    """Copy local raw exports into the artifact store; on S3-compatible stores create buckets first.
+
+    Retries for up to ~60 s, because in compose the S3 service may still be starting.
+    """
+    import time
+
     storage = open_storage(settings.artifact_root)
-    if hasattr(storage, "bucket"):
-        try:
-            storage.client.head_bucket(Bucket=storage.bucket)
-        except Exception:
-            storage.client.create_bucket(Bucket=storage.bucket)
     source = Path(args.source)
-    copied = 0
-    for path in sorted(source.rglob("*")):
-        if path.is_file():
-            key = f"raw/{path.relative_to(source).as_posix()}"
-            storage.write_bytes(key, path.read_bytes())
-            copied += 1
-    log.info("seeded raw data", extra=kv(files=copied, root=settings.artifact_root))
+    files = [p for p in sorted(source.rglob("*")) if p.is_file()]
+    for attempt in range(1, 21):
+        try:
+            if hasattr(storage, "bucket"):
+                for bucket in [storage.bucket, *args.extra_bucket]:
+                    _ensure_bucket(storage.client, bucket)
+            for path in files:
+                storage.write_bytes(f"raw/{path.relative_to(source).as_posix()}", path.read_bytes())
+            break
+        except Exception as exc:  # connection refused / 5xx while the store boots
+            if attempt == 20:
+                log.error("seeding failed", extra=kv(error=repr(exc)))
+                return EXIT_TRANSIENT
+            log.info("artifact store not ready, retrying", extra=kv(attempt=attempt, error=type(exc).__name__))
+            time.sleep(3)
+    log.info("seeded raw data", extra=kv(files=len(files), root=settings.artifact_root))
     return EXIT_OK
+
+
+def _ensure_bucket(client, bucket: str) -> None:
+    from botocore.exceptions import ClientError
+
+    try:
+        client.head_bucket(Bucket=bucket)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") in {"404", "NoSuchBucket", "NotFound"}:
+            client.create_bucket(Bucket=bucket)
+        else:
+            raise
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -145,6 +166,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sd = sub.add_parser("seed", help="copy data/raw into the artifact store")
     sd.add_argument("--source", default="data/raw")
+    sd.add_argument("--extra-bucket", action="append", default=[], help="also create this bucket (S3 only)")
     sd.set_defaults(func=cmd_seed)
     return p
 

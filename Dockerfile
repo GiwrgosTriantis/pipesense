@@ -41,7 +41,8 @@ LABEL org.opencontainers.image.title="pipesense" \
       org.opencontainers.image.revision="${GIT_SHA}" \
       org.opencontainers.image.version="${IMAGE_TAG}"
 RUN groupadd --system --gid 10001 pipesense \
- && useradd --system --uid 10001 --gid pipesense --home-dir /app --shell /usr/sbin/nologin pipesense
+ && useradd --system --uid 10001 --gid pipesense --home-dir /app --shell /usr/sbin/nologin pipesense \
+ && mkdir -p /data/runs && chown -R 10001:10001 /data   # dev profile mounts a volume here
 COPY --from=builder /opt/venv /opt/venv
 WORKDIR /app
 COPY config/pipeline.toml /app/config/pipeline.toml
