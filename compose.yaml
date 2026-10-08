@@ -81,7 +81,7 @@ services:
   s3:
     profiles: [prod]
     image: chrislusf/seaweedfs:4.44        # S3 API; MinIO stopped publishing images in 2026
-    command: server -ip=s3 -ip.bind=0.0.0.0 -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -master.volumeSizeLimitMB=256
+    command: server -ip=s3 -ip.bind=0.0.0.0 -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -master.volumeSizeLimitMB=256 -volume.max=0
     volumes:
       - s3-data:/data
       - ./deploy/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
@@ -123,6 +123,7 @@ services:
     depends_on:
       mlflow-prod: {condition: service_healthy}
       postgres: {condition: service_healthy}
+      elasticmq: {condition: service_started}
 
   elasticmq:                                # SQS API, same boto3 code as real SQS
     profiles: [prod]

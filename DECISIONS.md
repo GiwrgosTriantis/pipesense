@@ -1,8 +1,11 @@
 # DECISIONS
 
-This file has five parts: findings from the code review, assumptions, decisions, known debt and AI usage.
-I did the review on the untouched starter kit, before changing anything. Every finding with a number
-was reproduced by running the original code (see `analysis/review_checks.py`).
+Contents: (1) code review findings, (2) assumptions, (3) decisions and the alternatives I weighed,
+(4) ML results, (5) known debt, (6) AI usage.
+
+I reviewed the untouched starter kit (first commit) before changing anything. Every finding with a
+number was reproduced by running the original code. `analysis/review_checks.py` regenerates the ML
+numbers from a run of that commit.
 
 ---
 
@@ -138,29 +141,194 @@ These numbers are on the Fairport data: 3,015 rows, which leaves 2,992 after 15 
 
 ---
 
+### 1.7 Where each finding is addressed
+
+| Findings | Fixed by (commit title) | How |
+|---|---|---|
+| F1, F2 | *Hotfix the live scripts* | `set -euo pipefail` (after `.bashrc`), and `elapsed` bound before `try`. Shipped first, so live customers benefit before any migration. |
+| F3–F8, M2 | *Replace the scripts with a resumable stage runner…* | Per-job run directories, success markers with fingerprints, an append-only status log, real exceptions with exit codes. Customer jobs no longer train. |
+| 1.4, M5, M6 | *Add the pipesense package core* | `as_of` date, per-utility UTM zone, unknown materials counted and capped, imputation fitted inside the model pipeline with missing-value indicators. Scoring does not need labels. |
+| D1–D10, 1.2 | *Replace the shared conda env…*, *Rewrite the Dockerfile…* | uv lockfile with 13 runtime dependencies. Multi-stage, digest-pinned, non-root image with a `test` target. |
+| M1, M3, M4, M7, M9 | *Add the promotion gate…* plus the train stage | Spatial holdout, age-rule baseline, bootstrap CI, permutation importance, and a `known_leak` flag on predictions. M1 and M4 are only partly fixed: see 5. Known debt. |
+| `pickle` | train stage | MLflow saves the model with skops. Loading cannot execute code, and the trusted types are listed explicitly. |
+
+---
+
 ## 2. Assumptions
 
-These are proposed and still need confirming. Each one changes a design choice.
+The brief says not to ask, so each of these is a decision I would confirm with the team.
 
-- **A1. What a job is.** A customer request for `{job_id, utility}` means "score this utility's current pipe inventory
-  with the serving model". Training is a separate, scheduled or manual flow that ends at the promotion
-  gate, not something that happens inside every customer job (fixes M2).
-- **A2. `has_leak` and `num_breaks_5yr`.** I assume `has_leak` means "a leak was recorded in the observation window" and
-  `num_breaks_5yr` counts breaks *before* that window. If they overlap, `num_breaks_5yr` must be dropped or
-  recomputed with a cutoff (M4). I will train and report both variants.
-- **A3. Snapshot date.** Each raw export carries, or is given, an `as_of` date, and age is computed from it.
-- **A4. Global model or one per utility.** _TBD: decide when building requirement 4._
-- **A5. Data location.** Raw data arrives through object storage (S3, or MinIO locally), never baked into the image.
+- **A1. A customer job means scoring, not training.** `{job_id, utility}` means "score this utility's current inventory
+  with its serving model". Training is a separate pipeline that ends at the promotion gate. Retraining
+  inside every customer request was the root of M2: unaudited models, slow jobs and non-reproducible results.
+- **A2. `num_breaks_5yr` is observed before the leak window.** If the windows overlap, the feature
+  leaks the label (M4). I kept it, because it is the second most important feature, but listing it in
+  `[train].numeric_features` is a single config line. Removing it goes through the gate like any other
+  model change, and that is my first question for the data owner.
+- **A3. Every export carries an `as_of` date** (`raw/<utility>/meta.json`). Fairport's is set to
+  2026-01-01, which reproduces the kit's `CURRENT_YEAR = 2026`, so ages did not change during the refactor.
+- **A4. One registered model per utility** (`leak-risk-<utility>`). Utilities differ in materials,
+  soil and data quality, and per-utility gating means one utility's bad data cannot regress another's
+  model. A pooled model would help small utilities. The structure allows it later (see debt).
+- **A5. Raw exports arrive in object storage** under `raw/<utility>/` and are never baked into images.
+- **A6. Pipe IDs are unique within a utility**, and `has_leak` is 0/1 when present. Both are validated.
+- **A7. The inspection budget is the riskiest 10% of pipes.** This is the business metric in the gate (`top_k_frac`).
 
-## 3. Decisions (alternatives weighed)
+---
 
-_Fill in while building. One entry per decision: what I chose, the alternatives, why, and what would change my mind._
+## 3. Decisions (and the alternatives I weighed)
 
-## 4. Known debt
+### Requirement 1: reproducible environment
+- **uv with `uv.lock`**, instead of conda-lock, pip-tools or Poetry. Every dependency, including GDAL,
+  PROJ and GEOS through the pyogrio, pyproj and shapely wheels, ships as a manylinux wheel, so conda adds nothing but solve
+  time and the `defaults`-channel licensing question. uv gives one tool, hash-pinned transitive
+  dependencies, `uv sync --frozen` in Docker and on laptops, and the dev/runtime split via dependency groups.
+- **The team env's versions are kept** for numpy, pandas, scikit-learn and geopandas. Changing infrastructure and
+  numerics in the same step would make any metric change undiagnosable. Upgrading them is a separate,
+  gated change.
+- **The runtime holds only what is imported**, plus `mlflow-skinny`, `skops`, `boto3` and `psycopg`. The full
+  `mlflow` package (for a sqlite-backed registry in tests), `pytest` and `moto` are in the dev group only.
 
-_Fill in at the end._
+### Requirement 2: containers
+- **One image, every stage** (`ENTRYPOINT ["pipesense"]`). The alternative was one image per stage. All stages share the same
+  dependencies, so per-stage images would triple the build, scan and version surface for no isolation gain.
+- **How stages run in sequence:** an in-process runner, with files as the hand-off. Each stage writes under
+  `runs/<utility>/<job_id>/<stage>/` and commits with `_SUCCESS.json`. I considered Airflow (I run it in production),
+  a broker between stages and Step Functions. For a two-stage job, an orchestrator adds a service to run and
+  buys nothing the markers don't already give.
+- **Resume after failure:** a stage is skipped when its marker's fingerprint matches. The fingerprint is
+  a sha256 of the pipeline version, the stage's config section, the checksums of its raw inputs and the
+  upstream fingerprints. Writing the marker last makes it the commit point: partial output is simply
+  overwritten. A changed input re-runs exactly the affected stages. Tests: `test_resume_after_failure_skips_finished_stages`,
+  `test_changed_raw_data_invalidates_prepare_and_downstream`, and the worker retry test.
+- **Moving to another orchestrator without a rewrite:** stages are functions of a `StageContext` (utility, job_id,
+  config, storage). They read no environment variables and use no globals or fixed paths. `pipesense stage <name> --job-id …` runs one
+  stage after checking its upstream markers, and exit codes say whether to retry (0 / 2 permanent / 75 transient).
+  An Airflow task, a Step Functions state or an AWS Batch job is a single command, and Batch's `evaluateOnExit`
+  maps straight onto the exit codes.
+- **Intermediate format:** Parquet instead of GeoPackage. Downstream stages need no geometry, and Parquet
+  round-trips dtypes exactly.
+- **Image versioning:** each image is tagged with its git SHA and carries OCI labels. `PIPESENSE_GIT_SHA` and `PIPESENSE_IMAGE_TAG` are written
+  into every marker, model version and prediction manifest. Base images are pinned by digest. In AWS, ECR
+  tags are immutable and deploys reference the digest.
+- **A bad image in production:** roll back by redeploying the previous tag (in ECS, the previous task definition
+  revision). Then find the affected outputs by the `image_tag` in their markers and manifests, and re-run those jobs
+  with `--force`. Markers do **not** include the image tag on purpose: otherwise every deploy would invalidate
+  every cached stage. When stage logic changes meaning, `[pipeline].version` is bumped instead.
+- **Tests in the image:** `docker compose --profile test run --rm test` runs pytest in the `test` target,
+  which is the runtime image plus dev dependencies and tests.
 
-## 5. AI usage
+### Requirement 3: dev and production-like
+- **Config, not code:** `config/dev.env` and `config/prod.env` select the artifact store (`file://` or `s3://`), the MLflow
+  backend, the status backend and the log format. The AWS endpoints use boto3's standard `AWS_ENDPOINT_URL_S3/SQS`,
+  which are simply absent on real AWS. There is no `if env == "prod"` anywhere in the code.
+- **How a change travels:** commit → `test` image passes → build `pipesense:<sha>` → exercise it in dev
+  → set the same `IMAGE_TAG` for prod-like. Prod services have no `build:` section and use `pull_policy: never`,
+  so prod can only run an image that already exists. Pipeline parameters (`config/pipeline.toml`) are baked
+  into the image, so gate thresholds travel with the code. **Models do not travel:** each environment trains on its own
+  data and passes its own gate. The dev registry is disposable.
+- **SeaweedFS instead of MinIO** for the local S3 API. MinIO stopped publishing its community images in 2026.
 
-_Fill in honestly at the end. For example, Claude helped with the code review and ran the reproduction checks
-(`analysis/review_checks.py`), and I verified every finding against the code myself._
+### Requirement 4: model lifecycle
+- **Registry layout:** one MLflow registered model per utility. Aliases are used rather than the deprecated
+  stages. Only the gate, or an audited manual `promote`, moves `champion`.
+- **What winning means** (`gate.py`, thresholds in `[gate]`):
+  - G0: scores are sane.
+  - G1: the candidate beats ranking by age on average precision (AP) and on precision in the top 10%. A model that cannot beat a rule
+    a utility engineer could apply in a spreadsheet should not ship.
+  - G2: against the champion, AP improves by at least +0.005, without losing more than 0.02 precision@10% or 0.01 Brier score.
+    The Brier check matters because customers read the scores as probabilities.
+  - G3: the champion was evaluated on the same holdout definition, otherwise only a manual promote is possible.
+  - A tie is rejected, so retraining unchanged data does not churn the champion. This is tested.
+- **The holdout is the core of the design:** pipes are binned into 1 km blocks, and a hash of
+  `(utility, block size, block)` puts about 20% of blocks into a holdout that **no version ever trains on**. Champion and
+  challenger can therefore be compared fairly on the same unseen pipes, months apart, without storing
+  holdout files. Spatial blocks rather than random rows, because neighbouring pipes share soil, age and
+  pressure (M7). The served model is the one that was evaluated: it is trained on the non-holdout blocks only,
+  and I accept losing about 20% of training data so that the audited numbers describe the deployed artifact.
+- **The bootstrap CI is reported, not gated on.** With about 160 holdout leaks the 90% CI of the AP lift is roughly
+  ±0.05. Requiring the lower bound to be above 0 would block almost every honest improvement on one utility's
+  data. The CI is in every gate report, so a reviewer can see when a promotion was marginal.
+- **Audit trail:** each decision is an MLflow run (`leak-risk/<utility>/gate`). It holds every check with value and
+  threshold, all metrics, the bootstrap, the rules and the actor (`gate:auto` or a person). The run ID is tagged on
+  the model version, together with lineage tags (data fingerprint, git SHA, job). MLflow keeps no alias history, so
+  these runs are the history.
+- **Every prediction batch records its model:** `model_name` and `model_version` are on every row of
+  `predictions.csv`, and `manifest.json` holds the run ID, data fingerprint, `as_of`, git SHA and image tag. The
+  champion alias is resolved once, then the job loads that exact version, so the recorded version is
+  the one that scored even if the alias moves mid-job.
+- **Serialisation:** skops (MLflow's default) instead of pickle, with the trusted types listed explicitly.
+  `Tree` is trusted because models only come from our own registry.
+
+### Bonus: the miniature
+- **Queue:** ElasticMQ, an SQS-compatible broker. RabbitMQ would have worked, but with ElasticMQ the worker uses the
+  same boto3 calls, visibility timeouts, receive counts and DLQ as the SQS in DESIGN.md. The miniature is
+  the design, not an analogy.
+- **Failure policy:**
+  - Permanent errors fail fast to the DLQ with the reason. Retrying bad data wastes compute and delays telling the customer.
+  - Transient errors retry with exponential visibility backoff and resume from markers, then dead-letter after 3 attempts.
+  - A crashed worker's message is redelivered automatically.
+  - A status-store outage never fails a job.
+  - The demo shows a transient fault (attempt 2 skips `prepare`) and a broken export (`brokenville`, straight to the DLQ).
+- **Status:** an append-only Postgres event log, served by a ~100-line stdlib page that refreshes itself. Grafana or a
+  web framework would be one more thing to run, with no new information.
+- **Fault injection** is a message field honoured only when `PIPESENSE_ALLOW_FAULT_INJECTION=true` (local only).
+
+### Requirement 5
+See DESIGN.md. In short: an SQS fair queue → autoscaled ECS Fargate workers (the same worker), RDS, S3 and MLflow.
+Step Functions + Batch is the documented alternative. Migration is per-utility routing after shadow runs.
+
+---
+
+## 4. ML results on Fairport (production config)
+
+- **Holdout:** 945 pipes, 159 leaking (1 km blocks, 20% of blocks; the realised share varies with block density).
+- **Candidate v1:** AP 0.495, ROC AUC 0.83, precision@10% 0.574, Brier 0.112. Spatial 5-fold CV AP on the
+  training blocks is 0.510.
+- **Age rule:** AP 0.429, precision@10% 0.511. Lift +0.064 AP, bootstrap 90% CI [+0.019, +0.112]. **PROMOTED.**
+- **Retraining the same data:** v2 has AP lift +0.000 over the champion. **REJECTED** (no churn).
+- **Permutation importance** (holdout AP drop): age 0.22, `num_breaks_5yr` 0.08, `dist_to_center_m` 0.05,
+  material 0.05, then soil, length, pressure zone, density. Diameter is about 0. This settles M8: distance to centre
+  earns its place on the holdout, and density does not, but dropping it is a gated model change, not a refactor.
+- **Honest summary:** the model is a modest but real improvement over the obvious rule. The next gains come
+  from data (leak dates, pressure transients, repair history), not from model tuning.
+
+---
+
+## 5. Known debt (what I would do next, in order)
+
+1. **Target framing (M1)** is only mitigated. Predictions carry `known_leak`, so a utility can filter out pipes it
+   already knows have leaked. The champion is still trained on 80% of the same inventory it scores, so those scores are
+   in-sample. The real fix needs leak *dates*: train on features as of T with the label "leak in (T, T+12 months]", and use a
+   temporal plus spatial holdout.
+2. **`num_breaks_5yr` (M4)** needs the data owner's window definition before the next promotion.
+3. **Network-level features** (centroid, density) depend on the inventory at scoring time. They are consistent
+   because jobs score the full inventory, but they drift as the network grows. They should become a versioned
+   per-utility network snapshot.
+4. **Train idempotency:** if `train` dies after registering a version but before its marker, the retry
+   registers another version. The orphan is harmless (it is never gated or served), but it should be found by
+   `job_id` and reused.
+5. **Two workers on one job** (a heartbeat failure followed by redelivery) would write the same deterministic outputs. In
+   AWS I would add a conditional-write lease per `job_id` (a Postgres row lock or a DynamoDB condition).
+6. **Image size:** about 700 MB of venv, dominated by pyarrow, scipy and the bundled GDAL in pyogrio. It is fine for batch. A distroless
+   base and dropping matplotlib (log importances as a table only) would roughly halve it.
+7. **Small-utility models:** a pooled multi-utility model with utility-level features, gated per utility.
+8. **No CI pipeline** (out of scope per the brief). `docker compose --profile test run --rm test` is the CI step.
+9. **The MLflow server image** pins pip versions but not hashes. The compose credentials are local-only placeholders.
+
+---
+
+## 6. AI usage
+
+I used Claude (Anthropic) as a pair-programmer throughout:
+- **Review:** it ran the untouched pipeline and reproduction scripts with me. I checked every finding against the code
+  and kept only what reproduced (for example, the stale-features SUCCESS run and the `elapsed` NameError).
+- **Implementation:** drafted with Claude in small commits (the co-author trailer is on each commit).
+  I reviewed every diff, ran the tests and the end-to-end flows, and made the design calls (score vs train
+  split, the gate rules, spatial holdout, failure policy, SQS + ECS over Batch).
+- **Verification without a Docker daemon** (in Claude's sandbox): the builder step was reproduced with
+  `uv sync --frozen --no-dev --no-editable`. The prod-like profile was run natively against Postgres 16, a moto
+  S3+SQS server and an MLflow server on Postgres. I then ran the compose profiles on my machine.
+  _(George: keep the last sentence only once you have actually run them; delete this note.)_
+- Where AI output was wrong or risky, I changed it. For example, strict mode broke on `~/.bashrc`, and MLflow 3.16
+  rejected skops' untrusted types until the reviewed list was added.
