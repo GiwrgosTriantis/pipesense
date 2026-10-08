@@ -1,0 +1,44 @@
+[project]
+name = "pipesense"
+version = "0.2.0"
+description = "PipeSense leak-risk batch pipeline"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+# Only what the pipeline imports at runtime. The numerical stack keeps the exact versions of
+# the team's conda env, so containerisation does not also change model numerics (see DECISIONS.md).
+dependencies = [
+    "numpy==1.26.4",
+    "pandas==2.1.4",
+    "scikit-learn==1.6.0",
+    "geopandas==1.0.1",
+    "shapely==2.0.6",
+    "pyproj==3.7.0",
+    "pyogrio==0.10.0",
+    "pyarrow==18.1.0",
+    "matplotlib==3.9.3",
+    "mlflow-skinny==3.16.1",
+    "boto3==1.35.81",
+    "psycopg[binary]==3.2.3",
+]
+
+[project.scripts]
+pipesense = "pipesense.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest==8.3.4",
+    "moto[s3,sqs]==5.0.28",
+    # full MLflow only for tests: a real sqlite-backed tracking store + registry, no server needed
+    "mlflow==3.16.1",
+]
+
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pipesense"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# pipeline outputs and local stores (dev profile writes here)
+data/runs/
+.local/
+mlruns/
+*.db
