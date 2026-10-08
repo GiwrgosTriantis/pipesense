@@ -1,7 +1,8 @@
 # Same image, two environments, selected by configuration only (config/dev.env vs config/prod.env).
 #
 #   dev:  local volume as artifact store, MLflow on sqlite, file-based job status
-#   prod: S3 API (SeaweedFS), MLflow on Postgres with artifacts in S3
+#   prod: S3 API (SeaweedFS), MLflow on Postgres with artifacts in S3, Postgres job status,
+#         SQS API queue (ElasticMQ) + worker + status page: the miniature of DESIGN.md
 #
 # Only dev services have a `build:` section. Prod services reference pipesense:${IMAGE_TAG}
 # and never build: a change reaches prod-like by promoting an image tag already tested in dev.
@@ -13,9 +14,10 @@ x-pipeline-image: &pipeline-image
 
 services:
   # ------------------------------------------------------------------ dev
-  pipeline-dev:
+  pipeline-dev:                             # a tool: `docker compose run --rm pipeline-dev ...`
     <<: *pipeline-image
     profiles: [dev]
+    scale: 0
     build:
       context: .
       target: runtime
@@ -49,6 +51,7 @@ services:
 
   test:
     profiles: [test]
+    scale: 0
     image: pipesense-test:${IMAGE_TAG:-dev}
     pull_policy: never
     build:
@@ -112,12 +115,39 @@ services:
       postgres: {condition: service_healthy}
       s3-init: {condition: service_completed_successfully}
 
-  pipeline-prod:                            # ad-hoc commands: train, promote, models, run score
+  pipeline-prod:                            # a tool: train, promote, models, submit, dlq
     <<: *pipeline-image
     profiles: [prod]
+    scale: 0
     env_file: config/prod.env
     depends_on:
       mlflow-prod: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+
+  elasticmq:                                # SQS API, same boto3 code as real SQS
+    profiles: [prod]
+    image: softwaremill/elasticmq-native:1.7.1
+    volumes: ["./deploy/elasticmq/elasticmq.conf:/opt/elasticmq.conf:ro"]
+    ports: ["9325:9325"]                    # queue UI at http://localhost:9325
+
+  worker:
+    <<: *pipeline-image
+    profiles: [prod]
+    env_file: config/prod.env
+    command: ["worker"]
+    restart: unless-stopped
+    depends_on:
+      mlflow-prod: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+      elasticmq: {condition: service_started}
+
+  status:
+    <<: *pipeline-image
+    profiles: [prod]
+    env_file: config/prod.env
+    command: ["status-server", "--port", "8080"]
+    ports: ["8080:8080"]                    # job status page at http://localhost:8080
+    depends_on:
       postgres: {condition: service_healthy}
 
 volumes:

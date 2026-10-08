@@ -1,8 +1,14 @@
+import shutil
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
+
+from pipesense.config import PipelineConfig, Settings
+from pipesense.runner import run_pipeline
+from pipesense.status import FileStatusStore
+from pipesense.storage import LocalStorage
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -63,3 +69,40 @@ def synthetic_features(n: int = 600, seed: int = 0) -> pd.DataFrame:
 @pytest.fixture
 def features_df() -> pd.DataFrame:
     return synthetic_features()
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # MLflow writes local artifacts relative to cwd
+    root = tmp_path / "artifacts"
+    shutil.copytree(REPO / "data" / "raw", root / "raw")
+    cfg = (REPO / "config" / "pipeline.toml").read_text().replace("n_estimators = 200", "n_estimators = 40")
+    cfg = cfg.replace("bootstrap_samples = 1000", "bootstrap_samples = 200")
+    (tmp_path / "pipeline.toml").write_text(cfg)
+    settings = Settings.from_env(
+        {
+            "PIPESENSE_ARTIFACT_ROOT": f"file://{root}",
+            "MLFLOW_TRACKING_URI": f"sqlite:///{tmp_path / 'mlflow.db'}",
+            "PIPESENSE_PIPELINE_CONFIG": str(tmp_path / "pipeline.toml"),
+            "PIPESENSE_IMAGE_TAG": "test",
+            "PIPESENSE_GIT_SHA": "abc123",
+        }
+    )
+    for k, v in {"PIPESENSE_ARTIFACT_ROOT": settings.artifact_root, "MLFLOW_TRACKING_URI": settings.mlflow_tracking_uri,
+                 "PIPESENSE_PIPELINE_CONFIG": settings.pipeline_config_path, "PIPESENSE_LOG_FORMAT": "text"}.items():
+        monkeypatch.setenv(k, v)  # for tests that go through the CLI
+    storage = LocalStorage(root)
+    config = PipelineConfig.load(settings.pipeline_config_path)
+
+    def run(pipeline, job_id, **kw):
+        return run_pipeline(pipeline, "fairport", job_id, settings, config, storage, FileStatusStore(storage), **kw)
+
+    return {"settings": settings, "storage": storage, "run": run, "root": root, "config": config}
+
+
+def train_and_promote(env, job="train-1"):
+    """Train v1 and make it champion via the audited manual path (gate outcome irrelevant here)."""
+    from pipesense.cli import main
+
+    env["run"]("train", job)
+    assert main(["promote", "--utility", "fairport", "--version", "1", "--reason", "test", "--actor", "pytest"]) == 0

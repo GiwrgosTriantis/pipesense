@@ -6,6 +6,10 @@
     pipesense promote --utility fairport --version 3 --reason "rollback after bad v4"
     pipesense models --utility fairport                          # registry audit view
     pipesense seed                                               # load data/raw into the artifact store
+    pipesense submit --utility fairport                          # enqueue a job (bonus miniature)
+    pipesense worker                                             # consume the queue
+    pipesense dlq                                                # inspect dead-lettered jobs
+    pipesense status-server                                      # live job status page
 
 Exit codes: 0 success, 2 permanent failure (do not retry), 75 transient failure (retry).
 """
@@ -134,6 +138,59 @@ def _ensure_bucket(client, bucket: str) -> None:
             raise
 
 
+def cmd_submit(args, settings: Settings) -> int:
+    import boto3
+
+    storage = open_storage(settings.artifact_root)
+    status = make_status_store(settings, storage)
+    job_id = args.job_id or f"job-{datetime.now(timezone.utc):%Y%m%d-%H%M%S-%f}"
+    body = {"job_id": job_id, "utility": args.utility, "pipeline": args.pipeline}
+    if args.inject_fault:
+        body["inject_fault"] = args.inject_fault
+    sqs = boto3.client("sqs")
+    sqs.send_message(QueueUrl=sqs.get_queue_url(QueueName=settings.queue_name)["QueueUrl"], MessageBody=json.dumps(body))
+    status.record(job_id, args.utility, "QUEUED", detail=body)
+    print(json.dumps(body))
+    return EXIT_OK
+
+
+def cmd_worker(args, settings: Settings) -> int:
+    from pipesense.worker import Worker, install_signal_handlers
+
+    storage = open_storage(settings.artifact_root)
+    worker = Worker(settings, PipelineConfig.load(settings.pipeline_config_path), storage,
+                    make_status_store(settings, storage))
+    install_signal_handlers(worker)
+    log.info("worker started", extra=kv(queue=settings.queue_name, max_attempts=settings.max_attempts))
+    worker.run_forever(max_messages=args.max_messages)
+    return EXIT_OK
+
+
+def cmd_dlq(args, settings: Settings) -> int:
+    import boto3
+
+    sqs = boto3.client("sqs")
+    url = sqs.get_queue_url(QueueName=settings.dlq_name)["QueueUrl"]
+    resp = sqs.receive_message(QueueUrl=url, MaxNumberOfMessages=10, VisibilityTimeout=0,
+                               MessageAttributeNames=["All"], WaitTimeSeconds=1)
+    out = [{"body": json.loads(m["Body"]),
+            **{k: v["StringValue"] for k, v in m.get("MessageAttributes", {}).items()}}
+           for m in resp.get("Messages", [])]
+    print(json.dumps(out, indent=2))
+    return EXIT_OK
+
+
+def cmd_status_server(args, settings: Settings) -> int:
+    from pipesense.status_pg import PostgresStatusStore
+    from pipesense.status_server import serve
+
+    if settings.status_backend != "postgres":
+        print("status-server needs PIPESENSE_STATUS_BACKEND=postgres", file=sys.stderr)
+        return 2
+    serve(PostgresStatusStore(settings.database_url), args.port)
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="pipesense", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="command", required=True)
@@ -168,6 +225,24 @@ def build_parser() -> argparse.ArgumentParser:
     sd.add_argument("--source", default="data/raw")
     sd.add_argument("--extra-bucket", action="append", default=[], help="also create this bucket (S3 only)")
     sd.set_defaults(func=cmd_seed)
+
+    su = sub.add_parser("submit", help="enqueue a job message")
+    su.add_argument("--utility", required=True)
+    su.add_argument("--job-id")
+    su.add_argument("--pipeline", default="score", choices=["score", "train"])
+    su.add_argument("--inject-fault", metavar="STAGE", help="dev only: fail this stage on the first attempt")
+    su.set_defaults(func=cmd_submit)
+
+    w = sub.add_parser("worker", help="consume jobs from the queue")
+    w.add_argument("--max-messages", type=int, default=None, help="exit after N messages (tests)")
+    w.set_defaults(func=cmd_worker)
+
+    d = sub.add_parser("dlq", help="peek at dead-lettered jobs and why they failed")
+    d.set_defaults(func=cmd_dlq)
+
+    ss = sub.add_parser("status-server", help="serve the live job status page")
+    ss.add_argument("--port", type=int, default=8080)
+    ss.set_defaults(func=cmd_status_server)
     return p
 
 

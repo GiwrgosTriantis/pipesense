@@ -1,47 +1,15 @@
 """End-to-end tests on the real Fairport data, against a real (sqlite) MLflow registry."""
 
 import json
-import shutil
 
 import pandas as pd
 import pytest
 
 from pipesense import registry
-from pipesense.config import PipelineConfig, Settings
 from pipesense.errors import MissingPrerequisiteError, TransientError
-from pipesense.runner import run_pipeline
 from pipesense.status import FileStatusStore
-from pipesense.storage import LocalStorage
 
-from conftest import REPO
-
-
-@pytest.fixture
-def env(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)  # MLflow writes local artifacts relative to cwd
-    root = tmp_path / "artifacts"
-    shutil.copytree(REPO / "data" / "raw", root / "raw")
-    cfg = (REPO / "config" / "pipeline.toml").read_text().replace("n_estimators = 200", "n_estimators = 40")
-    (tmp_path / "pipeline.toml").write_text(cfg)
-    settings = Settings.from_env(
-        {
-            "PIPESENSE_ARTIFACT_ROOT": f"file://{root}",
-            "MLFLOW_TRACKING_URI": f"sqlite:///{tmp_path / 'mlflow.db'}",
-            "PIPESENSE_PIPELINE_CONFIG": str(tmp_path / "pipeline.toml"),
-            "PIPESENSE_IMAGE_TAG": "test",
-            "PIPESENSE_GIT_SHA": "abc123",
-        }
-    )
-    for k, v in {"PIPESENSE_ARTIFACT_ROOT": settings.artifact_root, "MLFLOW_TRACKING_URI": settings.mlflow_tracking_uri,
-                 "PIPESENSE_PIPELINE_CONFIG": settings.pipeline_config_path, "PIPESENSE_LOG_FORMAT": "text"}.items():
-        monkeypatch.setenv(k, v)  # for tests that go through the CLI
-    storage = LocalStorage(root)
-    config = PipelineConfig.load(settings.pipeline_config_path)
-
-    def run(pipeline, job_id, **kw):
-        return run_pipeline(pipeline, "fairport", job_id, settings, config, storage, FileStatusStore(storage), **kw)
-
-    return {"settings": settings, "storage": storage, "run": run, "root": root, "config": config}
+from conftest import train_and_promote
 
 
 def _champion(env):
@@ -80,23 +48,16 @@ def test_train_registers_a_version_and_the_gate_decides_with_an_audit_trail(env)
     assert 0 < baseline["average_precision"] < 1
 
 
-def _train_and_promote(env, job="train-1"):
-    from pipesense.cli import main
-
-    env["run"]("train", job)
-    assert main(["promote", "--utility", "fairport", "--version", "1", "--reason", "test", "--actor", "pytest"]) == 0
-
-
 def test_resume_after_failure_skips_finished_stages(env):
     with pytest.raises(MissingPrerequisiteError):
         env["run"]("score", "job-2")
-    _train_and_promote(env)
+    train_and_promote(env)
     result = env["run"]("score", "job-2")
     assert result.skipped == ["prepare"] and result.executed == ["predict"]
 
 
 def test_injected_transient_fault_then_retry_resumes(env):
-    _train_and_promote(env)
+    train_and_promote(env)
     with pytest.raises(TransientError):
         env["run"]("score", "job-3", fault_stage="predict")
     result = env["run"]("score", "job-3")
@@ -104,7 +65,7 @@ def test_injected_transient_fault_then_retry_resumes(env):
 
 
 def test_changed_raw_data_invalidates_prepare_and_downstream(env):
-    _train_and_promote(env)
+    train_and_promote(env)
     env["run"]("score", "job-4")
     raw = env["root"] / "raw" / "fairport" / "pipes.csv"
     df = pd.read_csv(raw)
@@ -120,7 +81,7 @@ def test_single_stage_requires_upstream_marker(env):
 
 
 def test_predictions_record_model_version_and_lineage(env):
-    _train_and_promote(env)
+    train_and_promote(env)
     env["run"]("score", "job-6")
     preds = pd.read_csv(env["root"] / "runs/fairport/job-6/predict/predictions.csv")
     assert len(preds) == 2992 and preds["pipe_id"].is_unique
@@ -132,7 +93,7 @@ def test_predictions_record_model_version_and_lineage(env):
 
 
 def test_scoring_does_not_need_labels(env):
-    _train_and_promote(env)
+    train_and_promote(env)
     raw = env["root"] / "raw" / "fairport" / "pipes.csv"
     pd.read_csv(raw).drop(columns="has_leak").to_csv(raw, index=False)
     env["run"]("score", "job-7")
@@ -141,7 +102,7 @@ def test_scoring_does_not_need_labels(env):
 
 
 def test_retraining_unchanged_data_does_not_replace_the_champion(env):
-    _train_and_promote(env)
+    train_and_promote(env)
     result = env["run"]("train", "train-2")
     assert result.summaries["train"]["model"]["version"] == "2"
     assert result.summaries["gate"]["decision"] == "REJECTED"
