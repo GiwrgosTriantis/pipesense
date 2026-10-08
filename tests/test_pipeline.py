@@ -56,13 +56,24 @@ def test_score_without_champion_fails_permanently_and_keeps_prepare(env):
     assert [e["state"] for e in status["events"]][-1] == "STAGE_FAILED"
 
 
-def test_train_registers_candidate_but_does_not_serve_it(env):
+def test_train_registers_a_version_and_the_gate_decides_with_an_audit_trail(env):
     result = env["run"]("train", "train-1")
     ref = result.summaries["train"]["model"]
     assert ref["version"] == "1"
     c = registry.client(env["settings"].mlflow_tracking_uri)
     tags = c.get_model_version(ref["name"], "1").tags
-    assert tags["lifecycle"] == "candidate" and tags["job_id"] == "train-1"
+    assert tags["job_id"] == "train-1" and tags["holdout_spec"].startswith("spatial-block:1000")
+    gate = result.summaries["gate"]
+    assert tags["gate_decision"] == gate["decision"] and tags["gate_run_id"] == gate["gate_run_id"]
+    audit = c.get_run(gate["gate_run_id"])
+    assert audit.data.tags["decision"] == gate["decision"] and audit.data.tags["actor"] == "gate:auto"
+    report = json.loads((env["root"] / "runs/fairport/train-1/gate/decision.json").read_text())
+    assert report["holdout"]["n"] > 400 and report["bootstrap"]["candidate_vs_baseline"]["ci90_low"] < 1
+    champion = _champion(env)
+    if gate["decision"] == "PROMOTED":
+        assert champion.version == "1" and tags["lifecycle"] == "champion"
+    else:
+        assert champion is None and tags["lifecycle"] == "candidate"
     assert json.loads(tags["feature_spec"])["categorical_features"] == ["material", "soil_type", "pressure_zone"]
     holdout, baseline = result.summaries["train"]["holdout"], result.summaries["train"]["baseline"]
     assert holdout["n"] > 400 and holdout["positives"] >= 50
@@ -127,3 +138,12 @@ def test_scoring_does_not_need_labels(env):
     env["run"]("score", "job-7")
     preds = pd.read_csv(env["root"] / "runs/fairport/job-7/predict/predictions.csv")
     assert "known_leak" not in preds.columns and len(preds) == 2992
+
+
+def test_retraining_unchanged_data_does_not_replace_the_champion(env):
+    _train_and_promote(env)
+    result = env["run"]("train", "train-2")
+    assert result.summaries["train"]["model"]["version"] == "2"
+    assert result.summaries["gate"]["decision"] == "REJECTED"
+    assert any("G2_ap_improves_on_champion" in r for r in result.summaries["gate"]["failed"])
+    assert _champion(env).version == "1"

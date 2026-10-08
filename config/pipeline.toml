@@ -24,3 +24,12 @@ block_size_m = 1000
 holdout_pct = 20
 cv_folds = 5
 top_k_frac = 0.10
+
+[gate]
+# What winning means; the rules are documented in src/pipesense/gate.py and DECISIONS.md.
+top_k_frac = 0.10                     # inspection budget: the riskiest 10% of pipes
+min_lift_over_baseline = 0.0          # holdout AP must at least match "oldest pipes first"
+min_improvement_over_champion = 0.005 # a tie does not replace the champion (no churn)
+max_precision_at_k_drop = 0.02
+max_brier_increase = 0.01
+bootstrap_samples = 1000              # reported in the audit, not gated on (see DECISIONS.md)

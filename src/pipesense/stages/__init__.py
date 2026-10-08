@@ -6,15 +6,16 @@
 """
 
 from pipesense.runner import Stage
-from pipesense.stages import predict, prepare, train
+from pipesense.stages import gate, predict, prepare, train
 
 STAGES: dict[str, Stage] = {
     "prepare": Stage("prepare", prepare.run, config_sections=("prepare",), external_inputs=prepare.input_checksums),
     "train": Stage("train", train.run, upstream=("prepare",), config_sections=("train",)),
+    "gate": Stage("gate", gate.run, upstream=("prepare", "train"), config_sections=("gate", "train")),
     "predict": Stage("predict", predict.run, upstream=("prepare",)),
 }
 
 PIPELINES: dict[str, list[str]] = {
     "score": ["prepare", "predict"],
-    "train": ["prepare", "train"],
+    "train": ["prepare", "train", "gate"],
 }
