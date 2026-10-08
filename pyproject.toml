@@ -42,3 +42,4 @@ packages = ["src/pipesense"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+filterwarnings = ["ignore:datetime.datetime.utcnow:DeprecationWarning:botocore"]

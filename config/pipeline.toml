@@ -1,0 +1,26 @@
+# Pipeline parameters: WHAT the pipeline does. Versioned with the code and baked into the image.
+# Infra settings (WHERE it runs) come from environment variables; see config/*.env.
+# Every section is part of its stage's fingerprint, so editing a value invalidates cached outputs.
+
+[pipeline]
+# Bump when stage logic changes meaning without a parameter change. This invalidates success markers.
+version = "2"
+
+[prepare]
+max_unknown_material_frac = 0.05
+max_dropped_frac = 0.20
+neighbour_radius_m = 500
+
+[train]
+numeric_features = ["age_years", "diameter_mm", "log_length", "num_breaks_5yr", "dist_to_center_m", "neighbours_500m"]
+categorical_features = ["material", "soil_type", "pressure_zone"]
+n_estimators = 200
+max_depth = 3
+learning_rate = 0.1
+random_state = 7
+# Spatial holdout. 1 km blocks are twice the 500 m density radius, which limits neighbourhood
+# overlap between training and holdout pipes. 20% of blocks leaves about 100 leaking pipes to evaluate on.
+block_size_m = 1000
+holdout_pct = 20
+cv_folds = 5
+top_k_frac = 0.10

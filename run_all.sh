@@ -6,7 +6,7 @@ source ~/.bashrc  # the VM relies on it for conda activation; sourced before str
 set -euo pipefail  # stop at the first failed stage instead of running later stages on stale files
 cd "$SCRIPT_DIR"
 
-export DATA_DIR=./data
+export DATA_DIR=./data/raw/fairport
 export WORK_DIR=./output
 
 echo "[run_all] starting pipeline at $(date)"
