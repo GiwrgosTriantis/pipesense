@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import signal
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -148,7 +149,15 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _exit_on_sigterm(signum, frame):
+    # As PID 1 in a container, Python ignores SIGTERM unless a handler is installed, so
+    # `docker stop` would wait and then SIGKILL. Raise instead: no marker is written for the
+    # interrupted stage, so the retried job resumes there.
+    raise SystemExit(128 + signum)
+
+
 def main(argv: list[str] | None = None) -> int:
+    signal.signal(signal.SIGTERM, _exit_on_sigterm)
     args = build_parser().parse_args(argv)
     try:
         settings = Settings.from_env()

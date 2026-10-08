@@ -1,0 +1,13 @@
+# Keep the build context small and free of local state, outputs and secrets.
+.git
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.local
+mlruns
+*.db
+data/runs
+analysis
+*.env.local
+.env
