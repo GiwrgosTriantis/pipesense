@@ -83,11 +83,11 @@ def run():
 
 
 if __name__ == "__main__":
+    start = time.time()
     try:
-        start = time.time()
         run()
-        elapsed = time.time() - start
     except Exception as exc:
+        elapsed = time.time() - start
         print(f"Training failed after {elapsed:.0f}s")
         write_status("FAILED", error=str(exc))
         raise

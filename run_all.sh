@@ -2,7 +2,8 @@
 # Leak pipeline — the job watcher on the analytics VM launches this for every requested job.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source ~/.bashrc
+source ~/.bashrc  # the VM relies on it for conda activation; sourced before strict mode
+set -euo pipefail  # stop at the first failed stage instead of running later stages on stale files
 cd "$SCRIPT_DIR"
 
 export DATA_DIR=./data
