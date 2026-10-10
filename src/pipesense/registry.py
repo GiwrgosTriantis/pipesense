@@ -24,6 +24,7 @@ from mlflow.exceptions import MlflowException
 from pipesense.errors import MissingPrerequisiteError, TransientError
 
 CHAMPION = "champion"
+DRIFT_REFERENCE = "drift/reference.json"  # artifact in each model's training run
 
 
 def model_name(utility: str) -> str:
@@ -85,6 +86,16 @@ def load_model(ref: ModelRef):
     import mlflow.sklearn
 
     return mlflow.sklearn.load_model(ref.uri)
+
+
+def load_drift_reference(ref: ModelRef) -> dict | None:
+    """The training-data profile logged with the model, or None for models trained before it existed."""
+    import mlflow.artifacts
+
+    try:
+        return mlflow.artifacts.load_dict(f"runs:/{ref.run_id}/{DRIFT_REFERENCE}")
+    except (MlflowException, OSError):
+        return None
 
 
 def record_gate_decision(

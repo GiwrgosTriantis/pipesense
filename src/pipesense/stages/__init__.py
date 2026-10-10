@@ -12,7 +12,7 @@ STAGES: dict[str, Stage] = {
     "prepare": Stage("prepare", prepare.run, config_sections=("prepare",), external_inputs=prepare.input_checksums),
     "train": Stage("train", train.run, upstream=("prepare",), config_sections=("train",)),
     "gate": Stage("gate", gate.run, upstream=("prepare", "train"), config_sections=("gate", "train")),
-    "predict": Stage("predict", predict.run, upstream=("prepare",)),
+    "predict": Stage("predict", predict.run, upstream=("prepare",), config_sections=("predict",)),
 }
 
 PIPELINES: dict[str, list[str]] = {

@@ -65,6 +65,14 @@ Alarms: DLQ depth > 0, oldest message age > 30 min, failure rate per utility, wo
 RDS storage and CPU. Once the cause is fixed, the runbook is "redrive the DLQ" (`StartMessageMoveTask`).
 Redrive is safe because of the markers.
 
+## Monitoring the model
+
+Every scoring job computes PSI per feature between the scored inventory and the champion's training
+data, using a profile stored with the model, and writes it to `manifest.json`. A feature above 0.2 logs a
+warning with `job_id` and `utility`. A CloudWatch metric filter turns it into a per-utility count for the daily
+digest. A feature that keeps drifting triggers a retrain, and the candidate still has to pass the gate.
+Drift never fails a customer job.
+
 ## Migrating without disrupting live customers
 
 0. **Today:** hotfix the VM scripts (strict mode, a correct `FAILED` status), already in the git history.

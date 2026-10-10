@@ -2,7 +2,8 @@
 
 Inputs:  prepare/features.parquet (must contain has_leak)
 Outputs: model.json (registered version + metrics), metrics.json, plus an MLflow run with the model,
-         spatial-CV metrics, holdout metrics, age-rule baseline metrics and permutation importances.
+         spatial-CV metrics, holdout metrics, age-rule baseline metrics, permutation importances and
+         the drift reference (drift/reference.json) that scoring jobs compare their data against.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from sklearn.inspection import permutation_importance
 from sklearn.metrics import average_precision_score
 from sklearn.model_selection import GroupKFold
 
+from pipesense import drift
 from pipesense import model as M
 from pipesense import registry
 from pipesense.errors import DataValidationError
@@ -85,7 +87,10 @@ def run(ctx: StageContext) -> dict:
         raise DataValidationError("too few leaking pipes to train and evaluate (need >= 10 on each side)")
 
     cv = _spatial_cv_ap(train_df, params)
-    model = M.build_model(params).fit(M.model_input(train_df, params), M.labels(train_df))
+    x_train = M.model_input(train_df, params)
+    model = M.build_model(params).fit(x_train, M.labels(train_df))
+    reference = drift.reference_profile(x_train, params["numeric_features"], params["categorical_features"],
+                                        bins=int(params.get("drift_bins", 10)))
 
     x_hold, y_hold = M.model_input(hold_df, params), M.labels(hold_df)
     scores = model.predict_proba(x_hold)[:, 1]
@@ -112,6 +117,7 @@ def run(ctx: StageContext) -> dict:
                             "cv_average_precision": cv["cv_average_precision"]})
         top_feature = _importances(model, x_hold, y_hold, d)
         mlflow.log_artifacts(d, artifact_path="evaluation")
+        mlflow.log_dict(reference, registry.DRIFT_REFERENCE)
         info = mlflow.sklearn.log_model(
             model,
             name="model",

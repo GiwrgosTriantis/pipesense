@@ -257,6 +257,17 @@ The brief says not to ask, so each of these is a decision I would confirm with t
   `predictions.csv`, and `manifest.json` holds the run ID, data fingerprint, `as_of`, git SHA and image tag. The
   champion alias is resolved once, then the job loads that exact version, so the recorded version is
   the one that scored even if the alias moves mid-job.
+- **Drift monitoring:** at train time the model's run stores a profile of its training rows as the model sees
+  them: decile bins plus a missing share for numeric features, and category shares for categoricals. Every
+  scoring job computes PSI per feature against the **champion's own** profile, writes it to `manifest.json`
+  and logs a warning above 0.2 (`[predict].psi_warn_threshold`). It is a warning, not a failure: drift is a
+  reason to look and to retrain, not to withhold a customer's results. Bad data is already refused by
+  `prepare`. PSI was chosen over KS tests because it treats numeric and categorical features the same way, and
+  because at 3,000 rows a KS test flags differences too small to matter. On Fairport, scoring the full
+  inventory gives PSI ≤ 0.01 for every feature. The unseen holdout blocks on their own reach about 0.1 on the
+  two geo features, and an inventory five years older gives 0.05 on age, so 0.2 means a real change to the
+  network or the export. Champions trained before this change have no profile, and their jobs record
+  `"status": "no_reference"`.
 - **Serialisation:** skops (MLflow's default) instead of pickle, with the trusted types listed explicitly.
   `Tree` is trusted because models only come from our own registry.
 

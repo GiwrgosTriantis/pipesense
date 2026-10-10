@@ -1,6 +1,7 @@
 """End-to-end tests on the real Fairport data, against a real (sqlite) MLflow registry."""
 
 import json
+import logging
 
 import pandas as pd
 import pytest
@@ -108,3 +109,42 @@ def test_retraining_unchanged_data_does_not_replace_the_champion(env):
     assert result.summaries["gate"]["decision"] == "REJECTED"
     assert any("G2_ap_improves_on_champion" in r for r in result.summaries["gate"]["failed"])
     assert _champion(env).version == "1"
+
+
+def test_predict_reports_drift_against_the_models_training_data(env):
+    train_and_promote(env)
+    env["run"]("score", "job-8")
+    manifest = json.loads((env["root"] / "runs/fairport/job-8/predict/manifest.json").read_text())
+    report = manifest["drift"]
+    assert report["status"] == "ok" and report["threshold"] == 0.2 and report["drifted"] == []
+    assert set(report["psi"]) == {"age_years", "diameter_mm", "log_length", "num_breaks_5yr", "dist_to_center_m",
+                                  "neighbours_500m", "material", "soil_type", "pressure_zone"}
+    assert report["reference_rows"] < report["rows"] == 2992  # reference = training blocks only
+
+
+def test_shifted_inventory_logs_a_drift_warning(env, caplog):
+    train_and_promote(env)
+    raw = env["root"] / "raw" / "fairport" / "pipes.csv"
+    df = pd.read_csv(raw)
+    df["install_year"] = df["install_year"] - 40  # every pipe 40 years older than the model has seen
+    df.to_csv(raw, index=False)
+    predict_log = logging.getLogger("pipesense.stages.predict")
+    predict_log.addHandler(caplog.handler)  # the CLI's setup_logging replaced the root handlers
+    try:
+        result = env["run"]("score", "job-9")
+    finally:
+        predict_log.removeHandler(caplog.handler)
+    assert result.summaries["predict"]["drift"] == "drift"
+    assert "age_years" in result.summaries["predict"]["drifted_features"]
+    warning = next(r for r in caplog.records if r.getMessage() == "feature drift above threshold")
+    assert warning.fields["psi"]["age_years"] > 0.2
+    manifest = json.loads((env["root"] / "runs/fairport/job-9/predict/manifest.json").read_text())
+    assert manifest["drift"]["drifted"][0] == "age_years"
+
+
+def test_model_without_drift_reference_still_scores(env, monkeypatch):
+    train_and_promote(env)
+    monkeypatch.setattr(registry, "load_drift_reference", lambda ref: None)  # e.g. a champion from before drift
+    env["run"]("score", "job-10")
+    manifest = json.loads((env["root"] / "runs/fairport/job-10/predict/manifest.json").read_text())
+    assert manifest["drift"]["status"] == "no_reference"

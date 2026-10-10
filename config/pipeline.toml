@@ -24,6 +24,12 @@ block_size_m = 1000
 holdout_pct = 20
 cv_folds = 5
 top_k_frac = 0.10
+# Drift reference saved with the model: decile bins per numeric feature (see src/pipesense/drift.py).
+drift_bins = 10
+
+[predict]
+# Warn when a feature's PSI against the model's training data exceeds this (0.2 is the usual "significant shift").
+psi_warn_threshold = 0.2
 
 [gate]
 # What winning means; the rules are documented in src/pipesense/gate.py and DECISIONS.md.

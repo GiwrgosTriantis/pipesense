@@ -2,7 +2,8 @@
 
 Inputs:  prepare/features.parquet, the `champion` alias in the MLflow registry
 Outputs: predictions.csv (customer-facing, one row per pipe, with model name and version on every row)
-         manifest.json (lineage: model version and run, data fingerprint, image, git sha)
+         manifest.json (lineage: model version and run, data fingerprint, image, git sha, and feature
+         drift: PSI per feature against the model's training data, with a warning above the threshold)
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 
+from pipesense import drift
 from pipesense import model as M
 from pipesense import registry
 from pipesense.errors import PermanentError
@@ -31,7 +33,8 @@ def run(ctx: StageContext) -> dict:
     spec = json.loads(registry.version_tags(c, ref)["feature_spec"])
     model = registry.load_model(ref)
 
-    scores = model.predict_proba(M.model_input(df, spec))[:, 1]
+    x = M.model_input(df, spec)
+    scores = model.predict_proba(x)[:, 1]
     if not np.isfinite(scores).all():
         raise PermanentError(f"model {ref.uri} produced non-finite scores")
 
@@ -47,6 +50,7 @@ def run(ctx: StageContext) -> dict:
     out = out.sort_values("risk_rank")
     ctx.storage.write_bytes(ctx.out("predictions.csv"), out.to_csv(index=False).encode())
 
+    drift_report = _drift(ref, x, float(ctx.params.get("psi_warn_threshold", 0.2)))
     prepare_marker = read_marker(replace(ctx, stage="prepare")) or {}
     manifest = {
         "job_id": ctx.job_id,
@@ -59,8 +63,23 @@ def run(ctx: StageContext) -> dict:
         "pipeline_version": ctx.config.version,
         "image_tag": ctx.settings.image_tag,
         "git_sha": ctx.settings.git_sha,
+        "drift": drift_report,
         "outputs": {"predictions": ctx.storage.uri(ctx.out("predictions.csv"))},
     }
     write_json(ctx.storage, ctx.out("manifest.json"), manifest)
     log.info("predictions written", extra=kv(rows=len(out), model_version=ref.version))
-    return {"rows": int(len(out)), "model": ref.as_dict()}
+    return {"rows": int(len(out)), "model": ref.as_dict(), "drift": drift_report["status"],
+            "drifted_features": drift_report.get("drifted", [])}
+
+
+def _drift(ref: registry.ModelRef, x, threshold: float) -> dict:
+    """Monitoring only: drift is reported and warned about, it never fails a customer job."""
+    reference = registry.load_drift_reference(ref)
+    if reference is None:
+        log.warning("no drift reference for this model; drift not checked", extra=kv(model_version=ref.version))
+        return {"status": "no_reference", "threshold": threshold}
+    report = drift.psi_report(reference, x, threshold)
+    if report["drifted"]:
+        log.warning("feature drift above threshold", extra=kv(
+            model_version=ref.version, threshold=threshold, psi={c: report["psi"][c] for c in report["drifted"]}))
+    return report
