@@ -166,7 +166,8 @@ The brief says not to ask, so each of these is a decision I would confirm with t
 - **A2. `num_breaks_5yr` is observed before the leak window.** If the windows overlap, the feature
   leaks the label (M4). I kept it, because it is the second most important feature, but listing it in
   `[train].numeric_features` is a single config line. Removing it goes through the gate like any other
-  model change, and that is my first question for the data owner.
+  model change, and that is my first question for the data owner. The stakes are high: without it the model
+  does not beat the age rule (see the `num_breaks_5yr` ablation in section 4).
 - **A3. Every export carries an `as_of` date** (`raw/<utility>/meta.json`). Fairport's is set to
   2026-01-01, which reproduces the kit's `CURRENT_YEAR = 2026`, so ages did not change during the refactor.
 - **A4. One registered model per utility** (`leak-risk-<utility>`). Utilities differ in materials,
@@ -322,8 +323,19 @@ Step Functions + Batch is the documented alternative. Migration is per-utility r
 - **Permutation importance** (holdout AP drop): age 0.22, `num_breaks_5yr` 0.08, `dist_to_center_m` 0.05,
   material 0.05, then soil, length, pressure zone, density. Diameter is about 0. This settles M8: distance to centre
   earns its place on the holdout, and density does not, but dropping it is a gated model change, not a refactor.
-- **Honest summary:** the model is a modest but real improvement over the obvious rule. The next gains come
-  from data (leak dates, pressure transients, repair history), not from model tuning.
+- **`num_breaks_5yr` ablation** (`analysis/breaks_ablation.py`): the same model trained without that feature on the
+  same training blocks and evaluated on the same holdout. Nothing is registered and no gate runs. Lift is AP over
+  the age rule, with the gate's paired bootstrap 90% CI.
+  - Full model (the champion): AP 0.495, precision@10% 0.574, Brier 0.112, lift +0.064 [+0.019, +0.112].
+  - Without `num_breaks_5yr`: AP 0.411, precision@10% 0.447, Brier 0.121, lift −0.017 [−0.055, +0.025].
+  - Age rule: AP 0.429, precision@10% 0.511 (no Brier score: its scores are not probabilities).
+
+  **Without `num_breaks_5yr` the model does not beat the age rule.** It is worse on both AP and
+  precision@10%, and it would fail gate rule G1. The model's entire lift depends on that one feature, which must
+  be confirmed as non-leaking (A2, M4) before any real promotion.
+- **Honest summary:** the model is a modest improvement over the obvious rule, and all of it comes from
+  `num_breaks_5yr`. It is only a real improvement if that feature is confirmed as non-leaking. The next gains
+  come from data (leak dates, pressure transients, repair history), not from model tuning.
 
 ---
 
@@ -336,7 +348,8 @@ Step Functions + Batch is the documented alternative. Migration is per-utility r
    filter the list. Cross-fitting also routes by block, not by pipe: if a pipe's coordinates are corrected
    after training and it moves into another training block, it is scored by a fold model that saw it. Routing
    known training pipes by `pipe_id` first would close that gap.
-2. **`num_breaks_5yr` (M4)** needs the data owner's window definition before the next promotion.
+2. **`num_breaks_5yr` (M4)** needs the data owner's window definition before any real promotion, because the
+   model's whole lift over the age rule depends on it (section 4).
 3. **Network-level features** (centroid, density) depend on the inventory at scoring time. They are consistent
    because jobs score the full inventory, but they drift as the network grows. They should become a versioned
    per-utility network snapshot.

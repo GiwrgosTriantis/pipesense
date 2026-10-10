@@ -93,7 +93,7 @@ src/pipesense/
 config/             pipeline.toml (what), dev.env / prod.env (where)
 deploy/             MLflow server image, Postgres init, SeaweedFS and ElasticMQ config
 data/raw/<utility>/ raw exports (pipes.csv + meta.json); brokenville is broken on purpose
-analysis/           reproduces the code-review numbers against the original starter kit
+analysis/           reproduces the code-review numbers (original starter kit) and the num_breaks_5yr ablation
 ```
 
 Clean up everything: `docker compose --profile dev --profile prod --profile test down -v`.
