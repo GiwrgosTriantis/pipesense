@@ -6,6 +6,8 @@ Changes from the starter kit (each one is a review finding in DECISIONS.md):
 * pipe age is measured from the export's `as_of` date, not a hard-coded CURRENT_YEAR
 * the metric CRS is derived per utility (estimate_utm_crs), not hard-coded to UTM 15N
 * unknown materials map to OTHER and are counted; too many fail the job instead of passing silently
+* values outside plausible bounds are counted; too many in one column fail the job as a likely unit
+  mismatch (inches instead of mm, km instead of m), instead of producing confident nonsense
 * conflicting duplicates (same pipe_id, different values) are dropped and counted, not resolved
   by row order
 * missing values are left as NaN. Imputation is fitted inside the model pipeline, so its state
@@ -14,7 +16,7 @@ Changes from the starter kit (each one is a review finding in DECISIONS.md):
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 import geopandas as gpd
 import numpy as np
@@ -35,6 +37,15 @@ MATERIAL_MAP = {
     "hdpe": "HDPE",
 }
 UNKNOWN_MATERIAL = "OTHER"
+
+# What a unit mismatch in each column usually looks like, for the error message.
+UNIT_HINTS = {
+    "diameter_mm": "diameter_mm must be millimetres: inches are ~25x smaller, metres ~1000x smaller",
+    "length_m": "length_m must be metres: kilometres are 1000x smaller",
+    "install_year": "install_year must be a 4-digit calendar year, not an age or a 2-digit year",
+    "lat": "lat/lon must be WGS84 degrees, not projected coordinates in metres",
+    "lon": "lat/lon must be WGS84 degrees, not projected coordinates in metres",
+}
 
 REQUIRED_COLUMNS = [
     "pipe_id",
@@ -61,6 +72,7 @@ class QualityReport:
     unknown_material: int = 0
     missing_install_year: int = 0
     missing_diameter: int = 0
+    out_of_range: dict = field(default_factory=dict)
     rows_out: int = 0
 
     @property
@@ -77,6 +89,29 @@ def validate_schema(df: pd.DataFrame) -> None:
     missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing:
         raise DataValidationError(f"raw export is missing required columns: {missing}")
+
+
+def check_plausible_ranges(df: pd.DataFrame, bounds: dict, max_frac: float) -> dict[str, int]:
+    """Count values outside [low, high] per column. Fail if any column has more than max_frac of them.
+
+    Missing values are not counted here (they have their own handling). A few implausible values are
+    tolerated and reported; many of them in one column almost always mean the column has the wrong unit.
+    """
+    counts, problems = {}, []
+    for col, (low, high) in bounds.items():
+        values = pd.to_numeric(df[col], errors="coerce")
+        present = values.notna()
+        outside = present & ~values.between(low, high)
+        counts[col] = int(outside.sum())
+        frac = outside.sum() / max(int(present.sum()), 1)
+        if frac > max_frac:
+            hint = UNIT_HINTS.get(col, f"check the unit of {col}")
+            problems.append(f"{col}: {int(outside.sum())} of {int(present.sum())} values ({frac:.1%}) outside "
+                            f"[{low:g}, {high:g}], median {values[present].median():g}. Likely a unit mismatch: {hint}")
+    if problems:
+        raise DataValidationError(
+            f"implausible values (limit {max_frac:.0%} per column): " + "; ".join(problems))
+    return counts
 
 
 def normalize_materials(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
@@ -146,9 +181,17 @@ def build_feature_table(
     max_unknown_material_frac: float = 0.05,
     max_dropped_frac: float = 0.2,
     neighbour_radius_m: float = 500.0,
+    bounds: dict | None = None,
+    max_out_of_range_frac: float = 0.02,
 ) -> tuple[pd.DataFrame, QualityReport]:
     validate_schema(raw)
     report = QualityReport(rows_in=len(raw))
+    if bounds:
+        bounds = {col: tuple(b) for col, b in bounds.items()}
+        if "install_year" in bounds:  # a pipe cannot be installed after the export was taken
+            low, high = bounds["install_year"]
+            bounds["install_year"] = (low, min(high, as_of_year))
+        report.out_of_range = check_plausible_ranges(raw, bounds, max_out_of_range_frac)
 
     df, n_unknown = normalize_materials(raw)
     report.unknown_material = n_unknown

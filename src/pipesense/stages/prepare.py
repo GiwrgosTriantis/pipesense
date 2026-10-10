@@ -56,6 +56,8 @@ def run(ctx: StageContext) -> dict:
         max_unknown_material_frac=float(p.get("max_unknown_material_frac", 0.05)),
         max_dropped_frac=float(p.get("max_dropped_frac", 0.2)),
         neighbour_radius_m=float(p.get("neighbour_radius_m", 500)),
+        bounds=p.get("bounds"),
+        max_out_of_range_frac=float(p.get("max_out_of_range_frac", 0.02)),
     )
     write_parquet(ctx.storage, ctx.out("features.parquet"), features)
     write_json(ctx.storage, ctx.out("quality.json"), report.as_dict())

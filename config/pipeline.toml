@@ -10,6 +10,18 @@ version = "3"
 max_unknown_material_frac = 0.05
 max_dropped_frac = 0.20
 neighbour_radius_m = 500
+# Plausibility bounds per raw column, inclusive. If more than max_out_of_range_frac of a column's values
+# fall outside, the export is refused: that is almost always a unit mismatch (inches instead of mm, km
+# instead of m, projected metres instead of degrees, 2-digit years), not bad pipes. install_year is also
+# capped at the export's as_of year. Feet vs metres (x3.3) stays inside the bounds and is NOT caught.
+max_out_of_range_frac = 0.02
+
+[prepare.bounds]
+diameter_mm = [20, 3000]
+length_m = [1, 5000]
+install_year = [1850, 2100]
+lat = [-90, 90]
+lon = [-180, 180]
 
 [train]
 numeric_features = ["age_years", "diameter_mm", "log_length", "num_breaks_5yr", "dist_to_center_m", "neighbours_500m"]

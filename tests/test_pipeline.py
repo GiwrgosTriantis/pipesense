@@ -10,7 +10,7 @@ from sklearn.model_selection import GroupKFold
 
 from pipesense import model as M
 from pipesense import registry
-from pipesense.errors import MissingPrerequisiteError, TransientError
+from pipesense.errors import DataValidationError, MissingPrerequisiteError, TransientError
 from pipesense.status import FileStatusStore
 
 from conftest import train_and_promote
@@ -193,3 +193,13 @@ def test_champion_from_before_cross_fitting_scores_everything_with_one_model(env
     env["run"]("score", "job-12")
     preds = pd.read_csv(env["root"] / "runs/fairport/job-12/predict/predictions.csv")
     assert set(preds["score_source"]) == {"full"} and np.isfinite(preds["leak_risk"]).all()
+
+
+def test_export_in_inches_is_refused_by_prepare_using_the_configured_bounds(env):
+    raw = env["root"] / "raw" / "fairport" / "pipes.csv"
+    df = pd.read_csv(raw)
+    df["diameter_mm"] = (df["diameter_mm"] / 25.4).round(1)
+    df.to_csv(raw, index=False)
+    with pytest.raises(DataValidationError, match="diameter_mm: .*inches"):
+        env["run"]("score", "job-13")
+    assert not env["storage"].exists("runs/fairport/job-13/prepare/_SUCCESS.json")

@@ -43,7 +43,7 @@ later is configuration. MWAA and EKS cost hundreds of dollars a month before the
 
 | Failure | What happens |
 |---|---|
-| Bad input | Missing column, too many invalid rows: exit 2 → `FAILED` at once, DLQ with the reason. |
+| Bad input | Missing column, implausible units, too many invalid rows: exit 2 → `FAILED` at once, DLQ with the reason. |
 | Transient error | Throttling, MLflow 5xx: retried with backoff, **skipping finished stages**. After 3 attempts → `DEAD_LETTERED`. |
 | Worker killed | OOM, SIGKILL, Spot, AZ loss: the next delivery records `PREVIOUS_ATTEMPT_LOST`, past 3 attempts `DEAD_LETTERED`. The queue's redrive policy is the backstop. |
 | Bad image | Redeploy the previous task definition by digest. Re-run jobs whose manifests carry the bad `image_tag`. |

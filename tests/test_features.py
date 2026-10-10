@@ -83,3 +83,49 @@ def test_fairport_feature_table_matches_review_numbers(fairport_raw):
     # derived UTM zone for Fairport (~94.8W) is zone 15: x within the zone's false-easting range
     assert df["x_m"].between(166_000, 834_000).all()
     assert np.isfinite(df["dist_to_center_m"]).all()
+
+
+BOUNDS = {"diameter_mm": [20, 3000], "length_m": [1, 5000], "install_year": [1850, 2100],
+          "lat": [-90, 90], "lon": [-180, 180]}
+
+
+def _build(raw, **kw):
+    return build_feature_table(raw, as_of_year=2026, bounds=BOUNDS, max_out_of_range_frac=0.02, **kw)
+
+
+@pytest.mark.parametrize(
+    "column, convert, hint",
+    [
+        ("diameter_mm", lambda v: v / 25.4, "inches"),            # an export in inches
+        ("length_m", lambda v: v / 1000, "kilometres"),           # an export in km
+        ("install_year", lambda v: v % 100, "2-digit year"),      # 1976 -> 76
+        ("lat", lambda v: v * 111_000, "projected coordinates"),  # metres instead of degrees
+    ],
+)
+def test_unit_mismatch_is_refused_with_a_hint(fairport_raw, column, convert, hint):
+    raw = fairport_raw.copy()
+    raw[column] = convert(raw[column])
+    with pytest.raises(DataValidationError, match="unit mismatch") as err:
+        _build(raw)
+    assert column in str(err.value) and hint in str(err.value)
+
+
+def test_install_years_after_the_export_date_are_implausible(fairport_raw):
+    raw = fairport_raw.copy()
+    raw["install_year"] = raw["install_year"] + 10  # newest pipes now "installed" in 2030
+    with pytest.raises(DataValidationError, match=r"install_year: .* outside \[1850, 2026\]"):
+        _build(raw)
+
+
+def test_a_few_implausible_values_are_tolerated_and_counted(fairport_raw):
+    raw = fairport_raw.copy()
+    raw.loc[raw.index[:10], "diameter_mm"] = 6.0  # 10 of ~3,000 rows: a typo, not a unit problem
+    _, report = _build(raw)
+    assert report.out_of_range["diameter_mm"] == 10
+    assert report.as_dict()["out_of_range"]["lat"] == 0
+
+
+def test_real_fairport_export_passes_the_bounds(fairport_raw):
+    features, report = _build(fairport_raw)
+    assert len(features) == 2992
+    assert report.out_of_range == {"diameter_mm": 0, "length_m": 8, "install_year": 0, "lat": 0, "lon": 0}

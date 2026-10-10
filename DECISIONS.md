@@ -176,6 +176,15 @@ The brief says not to ask, so each of these is a decision I would confirm with t
 - **A5. Raw exports arrive in object storage** under `raw/<utility>/` and are never baked into images.
 - **A6. Pipe IDs are unique within a utility**, and `has_leak` is 0/1 when present. Both are validated.
 - **A7. The inspection budget is the riskiest 10% of pipes.** This is the business metric in the gate (`top_k_frac`).
+- **A8. Exports use the documented units:** millimetres, metres, calendar years and WGS84 degrees. `prepare` checks
+  plausibility bounds per column (`[prepare.bounds]`). If more than 2% of a column's values fall outside, the
+  export is refused as a likely unit mismatch, and the message names the column, its median and the probable
+  cause. Fewer outliers are counted in `quality.json` and kept. Silently scoring an inch-based export as
+  millimetres would produce confident nonsense, which is worse than a failed job. The bounds are global, so
+  they catch inches instead of mm, km instead of m, projected coordinates and 2-digit years. They do not catch
+  feet instead of metres (×3.3 stays plausible) or coordinates in the wrong place: a per-utility bounding box
+  in `meta.json` would close the second gap. Fairport passes with 8 values out of range (the `length_m ≤ 0` rows
+  that cleaning drops anyway).
 
 ---
 
@@ -291,7 +300,8 @@ The brief says not to ask, so each of these is a decision I would confirm with t
   same boto3 calls, visibility timeouts, receive counts and DLQ as the SQS in DESIGN.md. The miniature is
   the design, not an analogy.
 - **Failure policy:**
-  - Permanent errors fail fast to the DLQ with the reason. Retrying bad data wastes compute and delays telling the customer.
+  - Permanent errors fail fast to the DLQ with the reason, including an export in the wrong units (A8). Retrying bad
+    data wastes compute and delays telling the customer.
   - Transient errors retry with exponential visibility backoff and resume from markers, then dead-letter after 3 attempts.
   - A crashed worker's message is redelivered automatically. Each attempt writes an outcome record next to
     the job's outputs, so the next delivery can see earlier attempts that never reported (an OOM kill or
