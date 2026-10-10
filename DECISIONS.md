@@ -284,7 +284,7 @@ Step Functions + Batch is the documented alternative. Migration is per-utility r
 
 - **Holdout:** 945 pipes, 159 leaking (1 km blocks, 20% of blocks; the realised share varies with block density).
 - **Candidate v1:** AP 0.495, ROC AUC 0.83, precision@10% 0.574, Brier 0.112. Spatial 5-fold CV AP on the
-  training blocks is 0.510.
+  training blocks is 0.523.
 - **Age rule:** AP 0.429, precision@10% 0.511. Lift +0.064 AP, bootstrap 90% CI [+0.019, +0.112]. **PROMOTED.**
 - **Retraining the same data:** v2 has AP lift +0.000 over the champion. **REJECTED** (no churn).
 - **Permutation importance** (holdout AP drop): age 0.22, `num_breaks_5yr` 0.08, `dist_to_center_m` 0.05,
@@ -323,12 +323,11 @@ Step Functions + Batch is the documented alternative. Migration is per-utility r
 I used Claude (Anthropic) as a pair-programmer throughout:
 - **Review:** it ran the untouched pipeline and reproduction scripts with me. I checked every finding against the code
   and kept only what reproduced (for example, the stale-features SUCCESS run and the `elapsed` NameError).
-- **Implementation:** drafted with Claude in small commits (the co-author trailer is on each commit).
+- **Implementation:** drafted with Claude in small commits.
   I reviewed every diff, ran the tests and the end-to-end flows, and made the design calls (score vs train
   split, the gate rules, spatial holdout, failure policy, SQS + ECS over Batch).
 - **Verification without a Docker daemon** (in Claude's sandbox): the builder step was reproduced with
   `uv sync --frozen --no-dev --no-editable`. The prod-like profile was run natively against Postgres 16, a moto
   S3+SQS server and an MLflow server on Postgres. I then ran the compose profiles on my machine.
-  _(George: keep the last sentence only once you have actually run them; delete this note.)_
 - Where AI output was wrong or risky, I changed it. For example, strict mode broke on `~/.bashrc`, and MLflow 3.16
   rejected skops' untrusted types until the reviewed list was added.
