@@ -293,7 +293,12 @@ The brief says not to ask, so each of these is a decision I would confirm with t
 - **Failure policy:**
   - Permanent errors fail fast to the DLQ with the reason. Retrying bad data wastes compute and delays telling the customer.
   - Transient errors retry with exponential visibility backoff and resume from markers, then dead-letter after 3 attempts.
-  - A crashed worker's message is redelivered automatically.
+  - A crashed worker's message is redelivered automatically. Each attempt writes an outcome record next to
+    the job's outputs, so the next delivery can see earlier attempts that never reported (an OOM kill or
+    SIGKILL). It records them as `PREVIOUS_ATTEMPT_LOST`, and once the receive count passes the attempt limit it
+    dead-letters the job at once. Without this, a job whose worker keeps dying would show `RUNNING` until the
+    broker's redrive policy (5 receives) moved the message silently. The records live in the artifact store,
+    not the status store, because status writes are best-effort and an outage must not look like a crash.
   - A status-store outage never fails a job.
   - The demo shows a transient fault (attempt 2 skips `prepare`) and a broken export (`brokenville`, straight to the DLQ).
 - **Status:** an append-only Postgres event log, served by a ~100-line stdlib page that refreshes itself. Grafana or a
@@ -357,7 +362,8 @@ Step Functions + Batch is the documented alternative. Migration is per-utility r
    registers another version. The orphan is harmless (it is never gated or served), but it should be found by
    `job_id` and reused.
 5. **Two workers on one job** (a heartbeat failure followed by redelivery) would write the same deterministic outputs. In
-   AWS I would add a conditional-write lease per `job_id` (a Postgres row lock or a DynamoDB condition).
+   AWS I would add a conditional-write lease per `job_id` (a Postgres row lock or a DynamoDB condition). Until
+   then the second delivery also reports the still-running first attempt as `PREVIOUS_ATTEMPT_LOST`.
 6. **Image size:** about 700 MB of venv, dominated by pyarrow, scipy and the bundled GDAL in pyogrio. It is fine for batch. A distroless
    base and dropping matplotlib (log importances as a table only) would roughly halve it.
 7. **Small-utility models:** a pooled multi-utility model with utility-level features, gated per utility.

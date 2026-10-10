@@ -18,7 +18,7 @@ from pipesense.status_pg import PostgresStatusStore
 log = get_logger(__name__)
 
 COLOURS = {"SUCCEEDED": "#1a7f37", "FAILED": "#cf222e", "DEAD_LETTERED": "#8250df",
-           "RETRYING": "#bf8700", "RUNNING": "#0969da", "QUEUED": "#57606a"}
+           "RETRYING": "#bf8700", "PREVIOUS_ATTEMPT_LOST": "#bc4c00", "RUNNING": "#0969da", "QUEUED": "#57606a"}
 
 
 def render(jobs: list[dict], selected: list[dict] | None, job_id: str | None) -> str:

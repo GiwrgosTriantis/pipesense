@@ -1,8 +1,7 @@
 # DESIGN: PipeSense on AWS, event-driven, for hundreds of utilities
 
-**Goal.** About 300 utilities request analyses at any time. A job takes 2 minutes to several hours, a team
-of two runs it, and live customers move over without an outage. The local `--profile prod` stack is a
-working miniature: same image, queue semantics and status model.
+**Goal.** About 300 utilities, jobs of 2 minutes to several hours at any time, two people to run it, and no
+outage for live customers. The local `--profile prod` stack is a working miniature of this design.
 
 ```mermaid
 flowchart LR
@@ -44,15 +43,15 @@ later is configuration. MWAA and EKS cost hundreds of dollars a month before the
 
 | Failure | What happens |
 |---|---|
-| Bad input (missing column, >20% invalid rows) | Exit 2 → `FAILED` at once, DLQ with the reason, customer notified. No retries. |
-| Transient (throttling, MLflow 5xx, Spot reclaim, OOM) | Retried with exponential backoff, **skipping finished stages**. After 3 attempts → `DEAD_LETTERED`. |
-| Worker or AZ dies mid-job | The undeleted message is redelivered. The redrive policy stops crash loops. |
+| Bad input | Missing column, too many invalid rows: exit 2 → `FAILED` at once, DLQ with the reason. |
+| Transient error | Throttling, MLflow 5xx: retried with backoff, **skipping finished stages**. After 3 attempts → `DEAD_LETTERED`. |
+| Worker killed | OOM, SIGKILL, Spot, AZ loss: the next delivery records `PREVIOUS_ATTEMPT_LOST`, past 3 attempts `DEAD_LETTERED`. The queue's redrive policy is the backstop. |
 | Bad image | Redeploy the previous task definition by digest. Re-run jobs whose manifests carry the bad `image_tag`. |
 | Bad model | `pipesense promote --version <previous>`: an audited rollback, effective for the next job. |
 | Status DB down | Jobs continue. SQS and the S3 markers are the source of truth. |
 
-Alarms: DLQ depth > 0, oldest message > 30 min, failure rate per utility. After a fix, redrive the DLQ.
-The markers make that safe.
+Alarms: DLQ depth > 0, oldest message > 30 min, failure rate per utility, and ECS task-stopped events with an
+`OutOfMemory` reason (EventBridge → alarm). After a fix, redrive the DLQ: the markers make it safe.
 
 **Model monitoring.** Each scoring job writes per-feature PSI against the champion's training data to
 `manifest.json` and warns above 0.2. A CloudWatch metric filter counts warnings per utility for the daily
@@ -93,4 +92,4 @@ Assumes 1,000 score jobs/day of 10 min on 1 vCPU / 4 GB and 1 h of weekly traini
 | **Total** | **~$850** | **~$460** |
 
 **Deliberately left out:** Kubernetes, Airflow, Kafka, multi-region, real-time serving, a feature store and
-GPUs. None is needed for batch scoring at this scale, and each would cost the team more time than it saves.
+GPUs. None is needed for batch scoring at this scale, and each costs more team time than it saves.

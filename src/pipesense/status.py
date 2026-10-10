@@ -1,6 +1,7 @@
 """Job status: an append-only event log plus a current state per job.
 
 States: QUEUED -> RUNNING -> (RETRYING -> RUNNING)* -> SUCCEEDED | FAILED | DEAD_LETTERED.
+A worker that dies mid-attempt records nothing; the next delivery records PREVIOUS_ATTEMPT_LOST for it.
 Stage-level events (STAGE_STARTED / STAGE_SKIPPED / STAGE_SUCCEEDED / STAGE_FAILED) are kept in
 the same log.
 

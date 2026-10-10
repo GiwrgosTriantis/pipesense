@@ -114,3 +114,52 @@ def test_status_store_outage_does_not_fail_the_job(env, queue):
     queue["worker"].run_forever(max_messages=1)
     assert env["storage"].exists("runs/fairport/fair-4/predict/_SUCCESS.json")
     assert queue["receive"](queue["worker"].queue_url) == []
+
+
+def _dies_mid_job(queue, env, job_id, utility):
+    """A worker that takes the message, starts the job and is OOM-killed: nothing recorded after RUNNING."""
+    msg = queue["sqs"].receive_message(QueueUrl=queue["worker"].queue_url, VisibilityTimeout=0,
+                                       AttributeNames=["ApproximateReceiveCount"])["Messages"][0]
+    attempt = int(msg["Attributes"]["ApproximateReceiveCount"])
+    FileStatusStore(env["storage"]).record(job_id, utility, "RUNNING", attempt=attempt)
+
+
+def test_crashed_attempt_is_recorded_and_the_next_attempt_resumes(env, queue):
+    train_and_promote(env)
+    queue["submit"](job_id="fair-5", utility="fairport")
+    _dies_mid_job(queue, env, "fair-5", "fairport")
+    assert queue["worker"].run_forever(max_messages=1) == 1
+
+    events = [(e["state"], e.get("attempt")) for e in _status(env, "fair-5")["events"]]
+    assert events[:3] == [("RUNNING", 1), ("PREVIOUS_ATTEMPT_LOST", 1), ("RUNNING", 2)]
+    assert events[-1] == ("SUCCEEDED", 2)
+    lost = next(e for e in _status(env, "fair-5")["events"] if e["state"] == "PREVIOUS_ATTEMPT_LOST")
+    assert "OOM kill" in lost["error"]
+
+
+def test_crashes_on_every_attempt_dead_letter_the_job_instead_of_leaving_it_running(env, queue, monkeypatch):
+    monkeypatch.setattr(W, "run_pipeline", lambda *a, **k: pytest.fail("a job past max attempts must not run"))
+    queue["submit"](job_id="fair-6", utility="fairport")
+    for _ in range(3):  # max_attempts = 3, every one OOM-killed
+        _dies_mid_job(queue, env, "fair-6", "fairport")
+    assert queue["worker"].run_forever(max_messages=1) == 1
+
+    status = _status(env, "fair-6")
+    assert status["state"] == "DEAD_LETTERED" and "worker died without reporting" in status["error"]
+    assert [e["state"] for e in status["events"]] == ["RUNNING"] * 3 + ["PREVIOUS_ATTEMPT_LOST"] * 3 + ["DEAD_LETTERED"]
+    dlq = queue["receive"](queue["worker"].dlq_url)
+    assert len(dlq) == 1 and dlq[0]["MessageAttributes"]["final_state"]["StringValue"] == "DEAD_LETTERED"
+    assert dlq[0]["MessageAttributes"]["attempts"]["StringValue"] == "4"
+    assert queue["receive"](queue["worker"].queue_url) == []
+
+
+def test_lost_attempt_is_reported_once_and_normal_retries_are_not_lost(env, queue, monkeypatch):
+    def always_fails(*args, **kwargs):
+        raise TransientError("S3 throttling")
+
+    monkeypatch.setattr(W, "run_pipeline", always_fails)
+    queue["submit"](job_id="fair-7", utility="fairport")
+    _dies_mid_job(queue, env, "fair-7", "fairport")        # attempt 1: lost
+    queue["worker"].run_forever(max_messages=2)            # attempts 2 and 3: transient failures
+    states = [(e["state"], e.get("attempt")) for e in _status(env, "fair-7")["events"]]
+    assert states == [("RUNNING", 1), ("PREVIOUS_ATTEMPT_LOST", 1), ("RETRYING", 2), ("DEAD_LETTERED", 3)]
