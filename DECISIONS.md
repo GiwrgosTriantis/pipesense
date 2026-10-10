@@ -97,7 +97,8 @@ These numbers are on the Fairport data: 3,015 rows, which leaves 2,992 after 15 
   The list a utility receives mostly tells it which pipes it already knows have leaked. The deeper problem is
   how the task is framed: `has_leak` is a historical label, while the utility wants the **risk of a future leak**.
   The target needs a defined observation window, and scoring should cover pipes and time periods the
-  model did not see in training.
+  model did not see in training. **Status:** the in-sample scoring is fixed by cross-fitting (section 3,
+  requirement 4); the target framing is still debt (section 5).
 - **M2. A new model goes live on every customer request.** Each job retrains, overwrites `model.pkl` and uses
   it immediately. There's no registry and no comparison with the previous model, so nobody can say which
   model produced a given set of predictions. This is the motivation for requirement 4.
@@ -149,7 +150,8 @@ These numbers are on the Fairport data: 3,015 rows, which leaves 2,992 after 15 
 | F3–F8, M2 | *Replace the scripts with a resumable stage runner…* | Per-job run directories, success markers with fingerprints, an append-only status log, real exceptions with exit codes. Customer jobs no longer train. |
 | 1.4, M5, M6 | *Add the pipesense package core* | `as_of` date, per-utility UTM zone, unknown materials counted and capped, imputation fitted inside the model pipeline with missing-value indicators. Scoring does not need labels. |
 | D1–D10, 1.2 | *Replace the shared conda env…*, *Rewrite the Dockerfile…* | uv lockfile with 13 runtime dependencies. Multi-stage, digest-pinned, non-root image with a `test` target. |
-| M1, M3, M4, M7, M9 | *Add the promotion gate…* plus the train stage | Spatial holdout, age-rule baseline, bootstrap CI, permutation importance, and a `known_leak` flag on predictions. M1 and M4 are only partly fixed: see 5. Known debt. |
+| M3, M4, M7, M9 | *Add the promotion gate…* plus the train stage | Spatial holdout, age-rule baseline, bootstrap CI, permutation importance. M4 is only partly fixed: see 5. Known debt. |
+| M1 | *Score every pipe out-of-fold with cross-fitted models* | Every pipe is scored by a model that never trained on it, with `score_source` on every row, plus a `known_leak` flag. The target-framing half of M1 is debt: see 5. |
 | `pickle` | train stage | MLflow saves the model with skops. Loading cannot execute code, and the trusted types are listed explicitly. |
 
 ---
@@ -244,8 +246,20 @@ The brief says not to ask, so each of these is a decision I would confirm with t
   `(utility, block size, block)` puts about 20% of blocks into a holdout that **no version ever trains on**. Champion and
   challenger can therefore be compared fairly on the same unseen pipes, months apart, without storing
   holdout files. Spatial blocks rather than random rows, because neighbouring pipes share soil, age and
-  pressure (M7). The served model is the one that was evaluated: it is trained on the non-holdout blocks only,
-  and I accept losing about 20% of training data so that the audited numbers describe the deployed artifact.
+  pressure (M7). The gated model is trained on the non-holdout blocks only, and I accept losing about 20% of
+  training data so that the audited numbers describe the deployed artifact.
+- **Cross-fitted scoring (M1):** the registered model is the full model plus the 5 spatial CV fold models over
+  the training blocks and the block→fold map, saved together with skops. A pipe in a training block is scored
+  by the fold model that held that block out. Holdout pipes, and pipes in blocks that were empty at training
+  time, are scored by the full model, which never trained on them. `score_source` (`oof` or `full`) is on
+  every row. The gate still evaluates the full model on the holdout, unchanged. The fold models are the ones
+  that produce the spatial CV AP (0.523), so every audited number now describes scores a customer actually
+  receives. Training cost is unchanged: the fold models were already fitted for the CV metric and then thrown
+  away. I rejected the alternatives of keeping in-sample scores with a flag (the list stays misleading) and
+  leaving training pipes out of the output (a utility needs a score for every pipe). The cost is that one
+  ranking mixes scores from 6 similar models. Because the full model is unchanged, the gate sees a
+  cross-fitted candidate as a tie with an older single-model champion, so the switch is an audited manual
+  `promote`.
 - **The bootstrap CI is reported, not gated on.** With about 160 holdout leaks the 90% CI of the AP lift is roughly
   ±0.05. Requiring the lower bound to be above 0 would block almost every honest improvement on one utility's
   data. The CI is in every gate report, so a reviewer can see when a promotion was marginal.
@@ -253,10 +267,10 @@ The brief says not to ask, so each of these is a decision I would confirm with t
   threshold, all metrics, the bootstrap, the rules and the actor (`gate:auto` or a person). The run ID is tagged on
   the model version, together with lineage tags (data fingerprint, git SHA, job). MLflow keeps no alias history, so
   these runs are the history.
-- **Every prediction batch records its model:** `model_name` and `model_version` are on every row of
-  `predictions.csv`, and `manifest.json` holds the run ID, data fingerprint, `as_of`, git SHA and image tag. The
-  champion alias is resolved once, then the job loads that exact version, so the recorded version is
-  the one that scored even if the alias moves mid-job.
+- **Every prediction batch records its model:** `model_name`, `model_version` and `score_source` are on every
+  row of `predictions.csv`, and `manifest.json` holds the run ID, data fingerprint, `as_of`, git SHA, image
+  tag and the count of `oof` and `full` scores. The champion alias is resolved once, then the job loads that
+  exact version, so the recorded version is the one that scored even if the alias moves mid-job.
 - **Drift monitoring:** at train time the model's run stores a profile of its training rows as the model sees
   them: decile bins plus a missing share for numeric features, and category shares for categoricals. Every
   scoring job computes PSI per feature against the **champion's own** profile, writes it to `manifest.json`
@@ -298,6 +312,13 @@ Step Functions + Batch is the documented alternative. Migration is per-utility r
   training blocks is 0.523.
 - **Age rule:** AP 0.429, precision@10% 0.511. Lift +0.064 AP, bootstrap 90% CI [+0.019, +0.112]. **PROMOTED.**
 - **Retraining the same data:** v2 has AP lift +0.000 over the champion. **REJECTED** (no churn).
+- **Out-of-fold scores** (dev run, v1 single model → v2 cross-fitted, same data): measured against
+  `known_leak`, the delivered list's AP fell from 0.785 (in-sample) to 0.512, in line with the CV (0.523) and
+  holdout (0.495) AP. The list now looks as good as it really is. The top 25 went from 25 known leaks to 19.
+  12 pipes stayed and 13 entered, and the 6 entrants without a recorded leak are cast iron aged 72 to 123
+  years. Known leaks fell from 93 to 71 in the top 100, and from 258 to 171 in the top 10%. Holdout pipes keep
+  identical scores, and they now take 82 rather than 72 of the top-10% places, because training pipes no
+  longer get inflated in-sample scores. Rank correlation between the two lists is 0.93.
 - **Permutation importance** (holdout AP drop): age 0.22, `num_breaks_5yr` 0.08, `dist_to_center_m` 0.05,
   material 0.05, then soil, length, pressure zone, density. Diameter is about 0. This settles M8: distance to centre
   earns its place on the holdout, and density does not, but dropping it is a gated model change, not a refactor.
@@ -308,10 +329,13 @@ Step Functions + Batch is the documented alternative. Migration is per-utility r
 
 ## 5. Known debt (what I would do next, in order)
 
-1. **Target framing (M1)** is only mitigated. Predictions carry `known_leak`, so a utility can filter out pipes it
-   already knows have leaked. The champion is still trained on 80% of the same inventory it scores, so those scores are
-   in-sample. The real fix needs leak *dates*: train on features as of T with the label "leak in (T, T+12 months]", and use a
-   temporal plus spatial holdout.
+1. **Target framing (M1).** In-sample scoring is fixed: no pipe is scored by a model that trained on it. What
+   remains is that `has_leak` is a historical label, so the model ranks pipes that resemble pipes that have
+   leaked, not pipes about to leak. The real fix needs leak *dates*: train on features as of T with the label
+   "leak in (T, T+12 months]", and use a temporal plus spatial holdout. Until then `known_leak` lets a utility
+   filter the list. Cross-fitting also routes by block, not by pipe: if a pipe's coordinates are corrected
+   after training and it moves into another training block, it is scored by a fold model that saw it. Routing
+   known training pipes by `pipe_id` first would close that gap.
 2. **`num_breaks_5yr` (M4)** needs the data owner's window definition before the next promotion.
 3. **Network-level features** (centroid, density) depend on the inventory at scoring time. They are consistent
    because jobs score the full inventory, but they drift as the network grows. They should become a versioned

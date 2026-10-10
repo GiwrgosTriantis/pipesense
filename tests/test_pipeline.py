@@ -3,9 +3,12 @@
 import json
 import logging
 
+import numpy as np
 import pandas as pd
 import pytest
+from sklearn.model_selection import GroupKFold
 
+from pipesense import model as M
 from pipesense import registry
 from pipesense.errors import MissingPrerequisiteError, TransientError
 from pipesense.status import FileStatusStore
@@ -148,3 +151,45 @@ def test_model_without_drift_reference_still_scores(env, monkeypatch):
     env["run"]("score", "job-10")
     manifest = json.loads((env["root"] / "runs/fairport/job-10/predict/manifest.json").read_text())
     assert manifest["drift"]["status"] == "no_reference"
+
+
+def test_score_job_never_uses_a_model_that_trained_on_the_pipe(env):
+    train_and_promote(env)
+    env["run"]("score", "job-11")
+    preds = pd.read_csv(env["root"] / "runs/fairport/job-11/predict/predictions.csv").set_index("pipe_id")
+    features = pd.read_parquet(env["root"] / "runs/fairport/job-11/prepare/features.parquet")
+    params = env["config"].section("train")
+    model = registry.load_model(_champion(env))
+    assert isinstance(model, M.CrossFitModel)
+
+    # Independently re-derive which rows each model trained on, the way the train stage split them.
+    hold = M.holdout_mask(features, "fairport", float(params["block_size_m"]), int(params["holdout_pct"]))
+    train_df = features[~hold]
+    blocks = M.spatial_blocks(train_df, float(params["block_size_m"]))
+    trained_on = {"full": set(train_df["pipe_id"])}
+    for k, (tr, te) in enumerate(GroupKFold(int(params["cv_folds"])).split(train_df, groups=blocks)):
+        trained_on[k] = set(train_df["pipe_id"].iloc[tr])
+        assert {model.block_fold[b] for b in blocks.iloc[te]} == {k}  # stored map matches the split
+
+    all_blocks = M.spatial_blocks(features, model.block_size_m)
+    x = M.model_input(features, json.loads(registry.version_tags(
+        registry.client(env["settings"].mlflow_tracking_uri), _champion(env))["feature_spec"]))
+    for i, pipe in enumerate(features["pipe_id"]):
+        k = model.block_fold.get(all_blocks.iloc[i], "full")
+        assert pipe not in trained_on[k]
+        assert preds.loc[pipe, "score_source"] == ("full" if k == "full" else "oof")
+        scorer = model.full if k == "full" else model.fold_models[k]
+        if i % 50 == 0:  # the published score really came from that model
+            assert preds.loc[pipe, "leak_risk"] == round(scorer.predict_proba(x.iloc[[i]])[0, 1], 4)
+
+    manifest = json.loads((env["root"] / "runs/fairport/job-11/predict/manifest.json").read_text())
+    assert manifest["score_sources"] == {"oof": int((~hold).sum()), "full": int(hold.sum())}
+
+
+def test_champion_from_before_cross_fitting_scores_everything_with_one_model(env, monkeypatch):
+    train_and_promote(env)
+    load = registry.load_model
+    monkeypatch.setattr(registry, "load_model", lambda ref: load(ref).full)  # a plain sklearn Pipeline
+    env["run"]("score", "job-12")
+    preds = pd.read_csv(env["root"] / "runs/fairport/job-12/predict/predictions.csv")
+    assert set(preds["score_source"]) == {"full"} and np.isfinite(preds["leak_risk"]).all()

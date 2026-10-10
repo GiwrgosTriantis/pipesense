@@ -1,7 +1,8 @@
 """Stage: score the utility's inventory with the champion model and record exactly which model did it.
 
 Inputs:  prepare/features.parquet, the `champion` alias in the MLflow registry
-Outputs: predictions.csv (customer-facing, one row per pipe, with model name and version on every row)
+Outputs: predictions.csv (customer-facing, one row per pipe, with model name and version on every row, and
+         score_source: "oof" for a fold model that never saw the pipe's block, "full" for the full model)
          manifest.json (lineage: model version and run, data fingerprint, image, git sha, and feature
          drift: PSI per feature against the model's training data, with a warning above the threshold)
 """
@@ -34,7 +35,10 @@ def run(ctx: StageContext) -> dict:
     model = registry.load_model(ref)
 
     x = M.model_input(df, spec)
-    scores = model.predict_proba(x)[:, 1]
+    if isinstance(model, M.CrossFitModel):
+        scores, source = model.score_pipes(x, M.spatial_blocks(df, model.block_size_m))
+    else:  # champions registered before cross-fitting: one model scores every pipe
+        scores, source = model.predict_proba(x)[:, 1], np.full(len(x), "full", dtype=object)
     if not np.isfinite(scores).all():
         raise PermanentError(f"model {ref.uri} produced non-finite scores")
 
@@ -44,6 +48,7 @@ def run(ctx: StageContext) -> dict:
     if LABEL in df.columns:
         # a recorded leak is already known to the utility; flagged so it can filter to unknown risk
         out["known_leak"] = df[LABEL].astype(int)
+    out["score_source"] = source
     out["model_name"] = ref.name
     out["model_version"] = ref.version
     out["job_id"] = ctx.job_id
@@ -60,6 +65,7 @@ def run(ctx: StageContext) -> dict:
         "data_fingerprint": prepare_marker.get("fingerprint"),
         "data_as_of": prepare_marker.get("summary", {}).get("as_of"),
         "rows": int(len(out)),
+        "score_sources": {k: int(v) for k, v in out["score_source"].value_counts().items()},
         "pipeline_version": ctx.config.version,
         "image_tag": ctx.settings.image_tag,
         "git_sha": ctx.settings.git_sha,

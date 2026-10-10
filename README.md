@@ -13,7 +13,7 @@ Everything below needs only **Docker with Compose v2**. No AWS account, Python o
 
 ```bash
 docker compose --profile test build test
-docker compose --profile test run --rm test          # 59 passed, 1 skipped (needs a live Postgres)
+docker compose --profile test run --rm test          # 63 passed, 1 skipped (needs a live Postgres)
 ```
 
 ## 2. Development setup (local volume + MLflow on sqlite)
@@ -83,7 +83,7 @@ src/pipesense/
   runner.py         stage runner: success markers, fingerprints, resume
   stages/           prepare, train, gate, predict: pure functions of a StageContext
   features.py       cleaning + feature engineering (no I/O)
-  model.py          model pipeline, spatial holdout, metrics, age-rule baseline
+  model.py          model pipeline, spatial holdout, cross-fitted scoring model, metrics, age-rule baseline
   gate.py           promotion rules ("what winning means")
   drift.py          training-data profile and per-feature PSI for scoring jobs
   registry.py       MLflow registry helpers + audit trail

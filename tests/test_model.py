@@ -3,6 +3,8 @@ import pandas as pd
 
 from pipesense import model as M
 
+from conftest import synthetic_features
+
 PARAMS = {
     "numeric_features": ["age_years", "diameter_mm", "log_length", "num_breaks_5yr", "dist_to_center_m", "neighbours_500m"],
     "categorical_features": ["material", "soil_type", "pressure_zone"],
@@ -62,3 +64,41 @@ def test_evaluate_and_bootstrap_shapes(features_df):
 def test_baseline_ranks_by_age_with_median_fill():
     df = pd.DataFrame({"age_years": [10.0, np.nan, 30.0]})
     assert list(M.baseline_scores(df)) == [10.0, 20.0, 30.0]
+
+
+class _Memorizer:
+    """Stand-in model that scores 1.0 for any row it was fitted on and 0.0 for anything else."""
+
+    def fit(self, x, y):
+        self.seen = {tuple(map(repr, row)) for row in x.itertuples(index=False)}
+        return self
+
+    def predict_proba(self, x):
+        hit = np.array([tuple(map(repr, row)) in self.seen for row in x.itertuples(index=False)], dtype=float)
+        return np.column_stack([1 - hit, hit])
+
+
+def test_no_pipe_is_scored_by_a_model_that_trained_on_it(features_df):
+    hold = M.holdout_mask(features_df, "fairport", 1000.0, 20)
+    train_df = features_df[~hold]
+    model, oof = M.fit_cross_fitted(train_df, PARAMS, build=lambda params: _Memorizer())
+    x_train = M.model_input(train_df, PARAMS)
+    assert model.full.predict_proba(x_train)[:, 1].all()  # the memoriser works: in-sample scores are 1
+
+    far = synthetic_features(n=20, seed=3).assign(x_m=50_000.0)  # new pipes in blocks nobody trained on
+    pipes = pd.concat([features_df, far], ignore_index=True)
+    scores, source = model.score_pipes(M.model_input(pipes, PARAMS), M.spatial_blocks(pipes, 1000.0))
+
+    assert (scores == 0).all() and (oof == 0).all()  # every score came from a model that never saw the row
+    is_train = np.r_[(~hold).to_numpy(), np.zeros(len(far), dtype=bool)]
+    assert (source[is_train] == "oof").all() and (source[~is_train] == "full").all()
+    assert len(model.fold_models) == 5 and set(model.block_fold.values()) == set(range(5))
+
+
+def test_cross_fit_full_model_is_the_plain_model_the_gate_evaluates(features_df):
+    model, oof = M.fit_cross_fitted(features_df, PARAMS)
+    x, y = M.model_input(features_df, PARAMS), M.labels(features_df)
+    plain = M.build_model(PARAMS).fit(x, y)
+    assert np.array_equal(model.predict_proba(x), plain.predict_proba(x))
+    assert set(model.block_fold) == set(M.spatial_blocks(features_df, 1000.0))
+    assert 0 < oof.min() and oof.max() < 1

@@ -4,7 +4,7 @@
 
 [pipeline]
 # Bump when stage logic changes meaning without a parameter change. This invalidates success markers.
-version = "2"
+version = "3"
 
 [prepare]
 max_unknown_material_frac = 0.05

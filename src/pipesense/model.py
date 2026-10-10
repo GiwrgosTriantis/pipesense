@@ -9,6 +9,11 @@ Evaluation design (see DECISIONS.md, requirement 4):
   Business metric: precision in the top 10% riskiest pipes (an inspection budget).
   Calibration guard: Brier score, because customers read the scores as probabilities.
 * Baseline: rank pipes by age. A model that cannot beat that rule should not ship.
+
+Scoring design (cross-fitting): the registered model is a CrossFitModel. Besides the full model it holds
+one model per spatial CV fold over the training blocks, and which fold held out each block. A pipe in a
+training block is scored by the fold model that never saw that block; any other pipe by the full model,
+which only trained on training blocks. No pipe is ever scored by a model that trained on it.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
+from sklearn.model_selection import GroupKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 
@@ -54,6 +60,65 @@ def model_input(df: pd.DataFrame, params: dict) -> pd.DataFrame:
     for c in params["categorical_features"]:
         x[c] = x[c].astype(str)
     return x
+
+
+class CrossFitModel:
+    """Full model + one model per spatial CV fold, and the fold that held out each training block.
+
+    predict / predict_proba use the full model: that is what the gate evaluates on the holdout.
+    score_pipes routes each pipe to a model that never trained on it.
+    """
+
+    def __init__(self, full, fold_models: list, block_fold: dict[str, int], block_size_m: float):
+        self.full = full
+        self.fold_models = list(fold_models)
+        self.block_fold = dict(block_fold)
+        self.block_size_m = float(block_size_m)
+
+    @property
+    def classes_(self):
+        return self.full.classes_
+
+    def predict(self, x: pd.DataFrame) -> np.ndarray:
+        return self.full.predict(x)
+
+    def predict_proba(self, x: pd.DataFrame) -> np.ndarray:
+        return self.full.predict_proba(x)
+
+    def score_pipes(self, x: pd.DataFrame, blocks: pd.Series) -> tuple[np.ndarray, np.ndarray]:
+        """Leak scores plus their source: "oof" (fold model that held out the pipe's block) or "full"."""
+        fold = blocks.map(self.block_fold).to_numpy()  # NaN: holdout or a block unseen in training
+        scores = np.zeros(len(x))
+        source = np.full(len(x), "full", dtype=object)
+        rows = pd.isna(fold)
+        if rows.any():
+            scores[rows] = self.full.predict_proba(x[rows])[:, 1]
+        for k, fold_model in enumerate(self.fold_models):
+            rows = fold == k
+            if rows.any():
+                scores[rows] = fold_model.predict_proba(x[rows])[:, 1]
+                source[rows] = "oof"
+        return scores, source
+
+
+def fit_cross_fitted(df: pd.DataFrame, params: dict, build=build_model) -> tuple[CrossFitModel, np.ndarray]:
+    """Fit one model per spatial GroupKFold fold over df's blocks, plus the full model on all of df.
+
+    Returns the model and the out-of-fold scores of df's rows: the spatial CV predictions, which are
+    exactly what the fold models will serve for these pipes.
+    """
+    block_size_m = float(params["block_size_m"])
+    groups = spatial_blocks(df, block_size_m)
+    folds = min(int(params.get("cv_folds", 5)), groups.nunique())
+    x, y = model_input(df, params), labels(df)
+    oof = np.zeros(len(df))
+    fold_models, block_fold = [], {}
+    for k, (tr, te) in enumerate(GroupKFold(folds).split(x, y, groups)):
+        fold_model = build(params).fit(x.iloc[tr], y[tr])
+        oof[te] = fold_model.predict_proba(x.iloc[te])[:, 1]
+        fold_models.append(fold_model)
+        block_fold.update({block: k for block in groups.iloc[te].unique()})
+    return CrossFitModel(build(params).fit(x, y), fold_models, block_fold, block_size_m), oof
 
 
 def spatial_blocks(df: pd.DataFrame, block_size_m: float) -> pd.Series:

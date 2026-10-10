@@ -1,7 +1,8 @@
 """Stage: train a candidate model and register it. It does NOT serve it; only the gate can.
 
 Inputs:  prepare/features.parquet (must contain has_leak)
-Outputs: model.json (registered version + metrics), metrics.json, plus an MLflow run with the model,
+Outputs: model.json (registered version + metrics), metrics.json, plus an MLflow run with the model
+         (a CrossFitModel: the full model, one model per spatial CV fold and the block->fold map),
          spatial-CV metrics, holdout metrics, age-rule baseline metrics, permutation importances and
          the drift reference (drift/reference.json) that scoring jobs compare their data against.
 """
@@ -20,7 +21,6 @@ import pandas as pd
 from mlflow.models import infer_signature
 from sklearn.inspection import permutation_importance
 from sklearn.metrics import average_precision_score
-from sklearn.model_selection import GroupKFold
 
 from pipesense import drift
 from pipesense import model as M
@@ -40,17 +40,8 @@ SKOPS_TRUSTED_TYPES = [
     "numpy.dtype",
     "sklearn.compose._column_transformer._RemainderColsList",
     "sklearn.tree._tree.Tree",
+    "pipesense.model.CrossFitModel",
 ]
-
-
-def _spatial_cv_ap(df: pd.DataFrame, params: dict) -> dict:
-    groups = M.spatial_blocks(df, float(params["block_size_m"]))
-    folds = min(int(params.get("cv_folds", 5)), groups.nunique())
-    x, y = M.model_input(df, params), M.labels(df)
-    oof = np.zeros(len(df))
-    for tr, te in GroupKFold(folds).split(x, y, groups):
-        oof[te] = M.build_model(params).fit(x.iloc[tr], y[tr]).predict_proba(x.iloc[te])[:, 1]
-    return {"cv_average_precision": float(average_precision_score(y, oof)), "cv_folds": folds}
 
 
 def _importances(model, x: pd.DataFrame, y: np.ndarray, out_dir: str) -> str:
@@ -86,9 +77,12 @@ def run(ctx: StageContext) -> dict:
     if hold_df[LABEL].sum() < 10 or train_df[LABEL].sum() < 10:
         raise DataValidationError("too few leaking pipes to train and evaluate (need >= 10 on each side)")
 
-    cv = _spatial_cv_ap(train_df, params)
+    # The spatial CV folds are also the scoring models: each serves the training blocks it held out.
+    crossfit, oof = M.fit_cross_fitted(train_df, params)
+    cv = {"cv_average_precision": float(average_precision_score(M.labels(train_df), oof)),
+          "cv_folds": len(crossfit.fold_models)}
+    model = crossfit.full
     x_train = M.model_input(train_df, params)
-    model = M.build_model(params).fit(x_train, M.labels(train_df))
     reference = drift.reference_profile(x_train, params["numeric_features"], params["categorical_features"],
                                         bins=int(params.get("drift_bins", 10)))
 
@@ -119,7 +113,7 @@ def run(ctx: StageContext) -> dict:
         mlflow.log_artifacts(d, artifact_path="evaluation")
         mlflow.log_dict(reference, registry.DRIFT_REFERENCE)
         info = mlflow.sklearn.log_model(
-            model,
+            crossfit,
             name="model",
             registered_model_name=name,
             serialization_format="skops",
