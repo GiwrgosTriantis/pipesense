@@ -6,6 +6,7 @@ Outputs: decision.json, plus an MLflow run in leak-risk/<utility>/gate holding t
 
 Candidate and champion are scored on the SAME spatial holdout, which neither model trained on
 (see model.holdout_mask). The rules live in gate.decide() and config/pipeline.toml [gate].
+The report also breaks AP and precision@k down per material (slices) for candidate, champion and age rule.
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ def run(ctx: StageContext) -> dict:
     metrics = {"candidate": M.evaluate(y, cand_scores, k), "baseline": M.evaluate(y, base_scores, k), "champion": None}
     bootstrap = {"candidate_vs_baseline": M.paired_bootstrap_ap_diff(y, cand_scores, base_scores, n_boot)}
 
-    comparable = True
+    comparable, champ_scores = True, None
     if champion is not None:
         spec_now = M.holdout_spec(train_params)
         spec_champion = registry.version_tags(c, champion).get("holdout_spec")
@@ -60,6 +61,12 @@ def run(ctx: StageContext) -> dict:
             metrics["champion"] = M.evaluate(y, champ_scores, k)
             bootstrap["candidate_vs_champion"] = M.paired_bootstrap_ap_diff(y, cand_scores, champ_scores, n_boot)
 
+    slice_by = rules.get("slice_by", "material")
+    slices = M.slice_metrics(y, hold[slice_by].to_numpy(), k,
+                             {"candidate": cand_scores, "champion": champ_scores, "baseline": base_scores})
+    for s in slices.values():
+        s["gated"] = s["positives"] >= int(rules["slice_min_leaks"]) and s["champion"] is not None
+
     decision = gate.decide(
         candidate=metrics["candidate"],
         baseline=metrics["baseline"],
@@ -67,6 +74,7 @@ def run(ctx: StageContext) -> dict:
         rules=rules,
         candidate_sane=sane,
         champion_comparable=comparable,
+        slices=slices,
     )
     report = {
         **decision.as_dict(),
@@ -78,6 +86,8 @@ def run(ctx: StageContext) -> dict:
         "rules": rules,
         "metrics": metrics,
         "bootstrap": bootstrap,
+        "slices": {"by": slice_by, "min_leaks": int(rules["slice_min_leaks"]),
+                   "max_ap_drop": float(rules["slice_max_ap_drop"]), "groups": slices},
     }
     gate_run_id = registry.record_gate_decision(c, ctx.utility, candidate, champion, report,
                                                 actor="gate:auto", job_id=ctx.job_id)

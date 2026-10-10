@@ -10,6 +10,9 @@ What winning means for a candidate model (thresholds live in config/pipeline.tom
                  most max_brier_increase
   G3 comparable  the champion was evaluated on the same holdout definition. If not, there is no
                  automatic decision: the candidate is REJECTED and needs a manual promote.
+  G4 no slice    (only when a comparable champion exists) in every slice (material) with at least
+     regression  slice_min_leaks holdout leaks, AP drops by at most slice_max_ap_drop vs the champion.
+                 Smaller slices are reported but not gated: with a handful of leaks their AP is noise.
 
 A candidate that only ties the champion is rejected, so retraining unchanged data does not churn
 the serving model.
@@ -54,6 +57,18 @@ def _pk(metrics: dict, top_k_frac: float) -> float:
     return metrics[f"precision_at_{int(top_k_frac * 100)}pct"]
 
 
+def _slice_checks(slices: dict, rules: dict) -> list[Check]:
+    min_leaks, max_drop = int(rules["slice_min_leaks"]), float(rules["slice_max_ap_drop"])
+    checks = []
+    for group, s in slices.items():
+        if s["positives"] < min_leaks or not s.get("champion"):
+            continue
+        drop = s["champion"]["average_precision"] - s["candidate"]["average_precision"]
+        checks.append(Check(f"G4_slice_ap_not_worse[{group}]", drop <= max_drop, round(drop, 4), max_drop,
+                            f"AP on {group} ({s['positives']} holdout leaks) drops by {drop:.4f} > {max_drop}"))
+    return checks
+
+
 def decide(
     candidate: dict,
     baseline: dict,
@@ -61,6 +76,7 @@ def decide(
     rules: dict,
     candidate_sane: bool = True,
     champion_comparable: bool = True,
+    slices: dict | None = None,
 ) -> Decision:
     k = float(rules["top_k_frac"])
     checks = [
@@ -92,5 +108,7 @@ def decide(
             max_up = float(rules["max_brier_increase"])
             checks.append(Check("G2_calibration_not_worse", brier_up <= max_up, round(brier_up, 4), max_up,
                                 f"Brier score rises by {brier_up:.4f} > {max_up}"))
+            if slices:
+                checks.extend(_slice_checks(slices, rules))
 
     return Decision(PROMOTED if all(c.passed for c in checks) else REJECTED, checks)

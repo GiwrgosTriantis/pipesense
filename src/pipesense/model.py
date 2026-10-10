@@ -169,6 +169,29 @@ def evaluate(y: np.ndarray, scores: np.ndarray, top_k_frac: float) -> dict:
     return out
 
 
+def slice_metrics(y: np.ndarray, groups: np.ndarray, top_k_frac: float, scores: dict) -> dict[str, dict]:
+    """AP and precision@k per slice (e.g. material) for each named scorer; None for an absent scorer.
+
+    AP is None in a slice without leaks: there is nothing to rank.
+    """
+    y, groups = np.asarray(y).astype(int), np.asarray(groups).astype(str)
+    pk = f"precision_at_{int(top_k_frac * 100)}pct"
+    out = {}
+    for group in sorted(set(groups)):
+        rows = groups == group
+        ys = y[rows]
+        entry = {"n": int(rows.sum()), "positives": int(ys.sum())}
+        for name, s in scores.items():
+            if s is None:
+                entry[name] = None
+                continue
+            ss = np.asarray(s, dtype=float)[rows]
+            entry[name] = {"average_precision": float(average_precision_score(ys, ss)) if ys.any() else None,
+                           pk: precision_at_frac(ys, ss, top_k_frac)}
+        out[group] = entry
+    return out
+
+
 def paired_bootstrap_ap_diff(
     y: np.ndarray, a: np.ndarray, b: np.ndarray, n_samples: int, seed: int = 0
 ) -> dict:

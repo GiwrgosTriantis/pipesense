@@ -102,3 +102,14 @@ def test_cross_fit_full_model_is_the_plain_model_the_gate_evaluates(features_df)
     assert np.array_equal(model.predict_proba(x), plain.predict_proba(x))
     assert set(model.block_fold) == set(M.spatial_blocks(features_df, 1000.0))
     assert 0 < oof.min() and oof.max() < 1
+
+
+def test_slice_metrics_per_group_with_undefined_ap_for_a_slice_without_leaks():
+    y = np.array([1, 0, 0, 1, 0, 0, 0, 0])
+    groups = np.array(["CI", "CI", "CI", "AC", "AC", "HDPE", "HDPE", "HDPE"])
+    good = np.array([0.9, 0.1, 0.2, 0.8, 0.3, 0.5, 0.4, 0.6])
+    out = M.slice_metrics(y, groups, 0.34, {"candidate": good, "champion": None})
+    assert out["CI"]["n"] == 3 and out["CI"]["positives"] == 1
+    assert out["CI"]["candidate"]["average_precision"] == 1.0 and out["CI"]["candidate"]["precision_at_34pct"] == 1.0
+    assert out["HDPE"]["positives"] == 0 and out["HDPE"]["candidate"]["average_precision"] is None
+    assert out["AC"]["champion"] is None

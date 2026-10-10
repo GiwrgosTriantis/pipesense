@@ -13,7 +13,7 @@ Everything below needs only **Docker with Compose v2**. No AWS account, Python o
 
 ```bash
 docker compose --profile test build test
-docker compose --profile test run --rm test          # 63 passed, 1 skipped (needs a live Postgres)
+docker compose --profile test run --rm test          # 79 passed, 1 skipped (needs a live Postgres)
 ```
 
 ## 2. Development setup (local volume + MLflow on sqlite)
@@ -33,7 +33,8 @@ docker compose --profile dev run --rm --entrypoint head pipeline-dev -5 /data/ru
 ```
 
 Training a second time on unchanged data registers v2, and the gate **rejects** it (a tie never replaces the
-champion). Every decision is a run in the `leak-risk/fairport/gate` experiment in MLflow.
+champion). Every decision is a run in the `leak-risk/fairport/gate` experiment in MLflow, and its report breaks
+AP and precision@10% down per material.
 
 ## 3. Production-like setup + the queue miniature (bonus)
 

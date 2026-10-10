@@ -203,3 +203,19 @@ def test_export_in_inches_is_refused_by_prepare_using_the_configured_bounds(env)
     with pytest.raises(DataValidationError, match="diameter_mm: .*inches"):
         env["run"]("score", "job-13")
     assert not env["storage"].exists("runs/fairport/job-13/prepare/_SUCCESS.json")
+
+
+def test_gate_report_has_material_slices_and_gates_only_slices_with_enough_leaks(env):
+    train_and_promote(env)
+    env["run"]("train", "train-3")
+    report = json.loads((env["root"] / "runs/fairport/train-3/gate/decision.json").read_text())
+    slices = report["slices"]
+    assert slices["by"] == "material" and slices["min_leaks"] == 30
+    groups = slices["groups"]
+    assert {g: s["positives"] for g, s in groups.items()} == {"AC": 27, "CI": 107, "DI": 11, "HDPE": 0, "PVC": 7, "STL": 7}
+    assert [g for g, s in groups.items() if s["gated"]] == ["CI"]
+    assert groups["HDPE"]["candidate"]["average_precision"] is None
+    for name in ("candidate", "champion", "baseline"):
+        assert set(groups["CI"][name]) == {"average_precision", "precision_at_10pct"}
+    g4 = [c for c in report["checks"] if c["name"].startswith("G4")]
+    assert [(c["name"], c["passed"], c["value"]) for c in g4] == [("G4_slice_ap_not_worse[CI]", True, 0.0)]

@@ -50,4 +50,10 @@ min_lift_over_baseline = 0.0          # holdout AP must at least match "oldest p
 min_improvement_over_champion = 0.005 # a tie does not replace the champion (no churn)
 max_precision_at_k_drop = 0.02
 max_brier_increase = 0.01
+# Slices: AP and precision@10% per material are reported for candidate, champion and age rule. Only a
+# slice with at least slice_min_leaks holdout leaks is gated: its AP may not drop more than
+# slice_max_ap_drop below the champion's. Smaller slices are too noisy to gate on (see DECISIONS.md).
+slice_by = "material"
+slice_min_leaks = 30
+slice_max_ap_drop = 0.05
 bootstrap_samples = 1000              # reported in the audit, not gated on (see DECISIONS.md)

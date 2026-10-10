@@ -251,6 +251,15 @@ The brief says not to ask, so each of these is a decision I would confirm with t
   - G2: against the champion, AP improves by at least +0.005, without losing more than 0.02 precision@10% or 0.01 Brier score.
     The Brier check matters because customers read the scores as probabilities.
   - G3: the champion was evaluated on the same holdout definition, otherwise only a manual promote is possible.
+  - G4: no material slice with at least 30 holdout leaks may lose more than 0.05 AP against the champion. A
+    better average can hide a worse ranking of cast iron, which is where most leaks are. Every gate report
+    lists AP and precision@10% per material for the candidate, the champion and the age rule. Smaller slices
+    are reported but not gated, because with a handful of leaks a slice's AP moves by more than any sensible
+    tolerance from one or two pipes, so gating on them would reject honest models at random. The 30-leak floor
+    and the 0.05 tolerance (wider than the aggregate 0.02 on precision) reflect that a slice has a fraction
+    of the holdout's 159 leaks. On Fairport only cast iron is gated (107 leaks). AC (27), DI (11), PVC (7) and
+    STL (7) are reported only, and HDPE has no holdout leaks, so its AP is undefined. A pooled multi-utility
+    holdout would let more slices qualify.
   - A tie is rejected, so retraining unchanged data does not churn the champion. This is tested.
 - **The holdout is the core of the design:** pipes are binned into 1 km blocks, and a hash of
   `(utility, block size, block)` puts about 20% of blocks into a holdout that **no version ever trains on**. Champion and
