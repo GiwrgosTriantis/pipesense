@@ -4,7 +4,7 @@ Batch pipeline that ranks a water utility's pipes by leak risk. It is containeri
 resumable, with a gated MLflow model lifecycle and a queue-driven miniature of the AWS design.
 
 - **DECISIONS.md:** review findings, assumptions, decisions and their alternatives, ML results, known debt, AI usage
-- **DESIGN.md:** how this runs on AWS for hundreds of utilities
+- **DESIGN.md:** how this runs on SageMaker (AWS) for hundreds of utilities
 - **ASSESSMENT.md:** the brief
 
 Everything below needs only **Docker with Compose v2**. No AWS account, Python or conda is required.

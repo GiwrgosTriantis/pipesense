@@ -216,8 +216,8 @@ The brief says not to ask, so each of these is a decision I would confirm with t
 - **Moving to another orchestrator without a rewrite:** stages are functions of a `StageContext` (utility, job_id,
   config, storage). They read no environment variables and use no globals or fixed paths. `pipesense stage <name> --job-id …` runs one
   stage after checking its upstream markers, and exit codes say whether to retry (0 / 2 permanent / 75 transient).
-  An Airflow task, a Step Functions state or an AWS Batch job is a single command, and Batch's `evaluateOnExit`
-  maps straight onto the exit codes.
+  An Airflow task, a Step Functions state, an AWS Batch job or a SageMaker Processing step is a single command, and
+  Batch's `evaluateOnExit` maps straight onto the exit codes.
 - **Intermediate format:** Parquet instead of GeoPackage. Downstream stages need no geometry, and Parquet
   round-trips dtypes exactly.
 - **Image versioning:** each image is tagged with its git SHA and carries OCI labels. `PIPESENSE_GIT_SHA` and `PIPESENSE_IMAGE_TAG` are written
@@ -306,8 +306,8 @@ The brief says not to ask, so each of these is a decision I would confirm with t
 
 ### Bonus: the miniature
 - **Queue:** ElasticMQ, an SQS-compatible broker. RabbitMQ would have worked, but with ElasticMQ the worker uses the
-  same boto3 calls, visibility timeouts, receive counts and DLQ as the SQS in DESIGN.md. The miniature is
-  the design, not an analogy.
+  same boto3 calls, visibility timeouts, receive counts and DLQ as the short-job path in DESIGN.md (SQS + Fargate).
+  For that path the miniature is the design, not an analogy. The SageMaker path is not simulated locally.
 - **Failure policy:**
   - Permanent errors fail fast to the DLQ with the reason, including an export in the wrong units (A8). Retrying bad
     data wastes compute and delays telling the customer.
@@ -324,9 +324,39 @@ The brief says not to ask, so each of these is a decision I would confirm with t
   web framework would be one more thing to run, with no new information.
 - **Fault injection** is a message field honoured only when `PIPESENSE_ALLOW_FAULT_INJECTION=true` (local only).
 
-### Requirement 5
-See DESIGN.md. In short: an SQS fair queue → autoscaled ECS Fargate workers (the same worker), RDS, S3 and MLflow.
-Step Functions + Batch is the documented alternative. Migration is per-utility routing after shadow runs.
+### Requirement 5: SageMaker as the execution layer
+See DESIGN.md. The platform target is SageMaker, so the decision was how much of the work to put on it. Every
+SageMaker fact below was checked against the AWS documentation, and every price against the AWS Price List
+(us-east-1, October 2026).
+- **Chosen: hybrid.** Training, the gate and long scoring jobs run as SageMaker Pipelines of Processing steps
+  that run our image with `pipesense` arguments. Short scoring jobs stay on SQS fair queues and Fargate
+  workers, exactly the miniature. Tracking and the registry move to a SageMaker MLflow App. The short/long
+  threshold is a config value set from start-up times measured in the pilot, so moving every job to SageMaker
+  later is one value.
+- **Pure SageMaker** (every job a pipeline execution): one execution layer and one console. Rejected for short
+  jobs. A Processing job launches and releases its own instances (warm pools are a training-job feature), and
+  AWS publishes no start-up time, so a 2-minute job could spend longer starting than working. 1,000 jobs a day
+  would also press on the default quotas: 4 processing instances in total, 20 concurrent pipeline executions,
+  and a fixed 1 `CreateProcessingJob` per second. Running all scoring on ml.m5.large would cost about $575 a
+  month in compute against about $450 for the hybrid, before any start-up time.
+- **ECS only** (the previous design): the cheapest (about $290 scoring and $300 training compute a month on
+  Fargate) and already demonstrated locally. Rejected because SageMaker is the given target, and ECS only
+  would leave us running our own MLflow server outside the platform. It survives as the short-job path.
+- **What SageMaker does not give us, and what we keep:** Pipelines retry policies cover service, throttling,
+  internal-error, capacity and resource-limit faults, not our exit codes. Application retries (exit 75)
+  therefore re-start the execution from a Lambda that reads the error class `pipesense` writes to
+  `/opt/ml/output/message` (the job's `ExitMessage`). The markers make a re-start cost start-ups only: a
+  finished step is provisioned again but skips its work. Step
+  caching keys on the job request (`AppSpecification`, `Environment`, `ProcessingInputs`), not on the S3
+  content our stages read, so caching stays off and the markers stay.
+- **MLflow version:** AWS requires the client to match the server. Managed tracking servers support up to
+  MLflow 3.0, and 3.0's `mlflow.sklearn` writes only pickle or cloudpickle (checked in the v3.0.0 source),
+  which would undo the skops decision. MLflow Apps run 3.10, which writes skops, at no additional charge. The
+  client therefore moves from 3.16.1 down to 3.10.x, plus the `sagemaker-mlflow` plugin. That downgrade must
+  pass the full test suite before any utility moves, and because Apps auto-update, CI checks that the versions
+  still match.
+- **Migration** keeps its shape: shadow per utility, then route per utility. Each utility's first champion is
+  trained and gated in the managed registry; models are not copied across.
 
 ---
 
@@ -388,6 +418,10 @@ Step Functions + Batch is the documented alternative. Migration is per-utility r
 7. **Small-utility models:** a pooled multi-utility model with utility-level features, gated per utility.
 8. **No CI pipeline** (out of scope per the brief). `docker compose --profile test run --rm test` is the CI step.
 9. **The MLflow server image** pins pip versions but not hashes. The compose credentials are local-only placeholders.
+10. **SageMaker migration work not yet in this repo:** writing the error class to `/opt/ml/output/message`;
+    pinning `mlflow-skinny` 3.10.x plus `sagemaker-mlflow` and re-running the tests (the image still uses
+    3.16.1); the pipeline definitions, the dispatcher and retry Lambdas, and the quota increases. DESIGN.md
+    describes the target, not what runs today.
 
 ---
 
@@ -398,7 +432,10 @@ I used Claude (Anthropic) as a pair-programmer throughout:
   and kept only what reproduced (for example, the stale-features SUCCESS run and the `elapsed` NameError).
 - **Implementation:** drafted with Claude in small commits.
   I reviewed every diff, ran the tests and the end-to-end flows, and made the design calls (score vs train
-  split, the gate rules, spatial holdout, failure policy, SQS + ECS over Batch).
+  split, the gate rules, spatial holdout, failure policy, the SageMaker/Fargate hybrid).
+- **SageMaker design:** Claude checked each SageMaker claim in DESIGN.md against the AWS documentation and took prices
+  from the AWS Price List API. That check is why the registry is an MLflow App rather than a tracking server (3.0
+  cannot write skops models).
 - **Verification without a Docker daemon** (in Claude's sandbox): the builder step was reproduced with
   `uv sync --frozen --no-dev --no-editable`. The prod-like profile was run natively against Postgres 16, a moto
   S3+SQS server and an MLflow server on Postgres. I then ran the compose profiles on my machine.
