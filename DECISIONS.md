@@ -1,7 +1,19 @@
 # DECISIONS
 
+**Summary.**
+- **Review:** the starter kit reported failed runs as SUCCESS (F1, F2), let concurrent jobs overwrite each
+  other (F3), retrained and served a new model on every request (M2), and delivered in-sample scores that were
+  mostly known leaks (M1), from a model about 0.03 AP better than sorting pipes by age (M3).
+- **Decisions:** customer jobs only score, and training is a separate gated pipeline (A1). Candidates are
+  judged on a spatial-block holdout that no version trains on, and must beat the age rule and the champion.
+  Cross-fitting scores every pipe with a model that never trained on it. Fingerprinted success markers make
+  reruns skip finished work. SageMaker runs training and long jobs, SQS + Fargate the short ones (DESIGN.md).
+- **Biggest open debt:** the model's whole lift over the age rule comes from `num_breaks_5yr`, which may leak
+  the label until its window is confirmed (A2, section 4); and without leak dates the target is past leaks,
+  not future risk (debt 1).
+
 Contents: (1) code review findings, (2) assumptions, (3) decisions and the alternatives I weighed,
-(4) ML results, (5) known debt, (6) AI usage.
+(4) ML results and feature timing, (5) known debt, (6) AI usage, (7) what I verified by hand.
 
 I reviewed the untouched starter kit (first commit) before changing anything. Every finding with a
 number was reproduced by running the original code. `analysis/review_checks.py` regenerates the ML
@@ -391,6 +403,22 @@ SageMaker fact below was checked against the AWS documentation, and every price 
   `num_breaks_5yr`. It is only a real improvement if that feature is confirmed as non-leaking. The next gains
   come from data (leak dates, pressure transients, repair history), not from model tuning.
 
+### Feature timing audit
+
+Can each model input be known when a pipe is scored, before the leak it predicts?
+
+| Feature | Meaning | Known at prediction time | Leakage risk | Decision |
+|---|---|---|---|---|
+| `age_years` | export `as_of` year − `install_year`; missing kept and flagged | Yes | Low, if `as_of` is right (A3) | Keep |
+| `diameter_mm` | nominal diameter | Yes | Low | Keep (holdout importance ≈ 0) |
+| `log_length` | log(1 + `length_m`) | Yes | Low | Keep |
+| `num_breaks_5yr` | breaks recorded in a 5-year window | **Unconfirmed**: depends on where the window ends | **High** if it overlaps the leak window: a leak can be counted as a break | **Unconfirmed** (A2, M4). The model's whole lift depends on it ([ablation](#4-ml-results-on-fairport-production-config), [`analysis/breaks_ablation.py`](analysis/breaks_ablation.py)) |
+| `dist_to_center_m` | distance to the network centroid, in the utility's UTM zone | Yes, from the scored inventory | Low; drifts as the network grows | Keep; versioned network snapshot is debt 3 |
+| `neighbours_500m` | other pipes within 500 m | Yes, from the scored inventory | Low; same drift | Keep for now; dropping it is a gated change (M8) |
+| `material` | normalised material code, unknown → `OTHER` | Yes | Low | Keep |
+| `soil_type` | soil class | Yes | Low | Keep |
+| `pressure_zone` | current pressure zone | Yes | Low; a zone change rewrites history | Keep |
+
 ---
 
 ## 5. Known debt (what I would do next, in order)
@@ -413,8 +441,10 @@ SageMaker fact below was checked against the AWS documentation, and every price 
 5. **Two workers on one job** (a heartbeat failure followed by redelivery) would write the same deterministic outputs. In
    AWS I would add a conditional-write lease per `job_id` (a Postgres row lock or a DynamoDB condition). Until
    then the second delivery also reports the still-running first attempt as `PREVIOUS_ATTEMPT_LOST`.
-6. **Image size:** about 700 MB of venv, dominated by pyarrow, scipy and the bundled GDAL in pyogrio. It is fine for batch. A distroless
-   base and dropping matplotlib (log importances as a table only) would roughly halve it.
+6. **Image size:** 955 MB, of which the venv is 846 MB. The largest packages are pyarrow (131 MB), scipy
+   (111), pandas (72), scikit-learn (57) and pyogrio's bundled GDAL (50). It is fine for batch. pyarrow is
+   only there for the Parquet intermediates, so replacing that format is the one big saving; a smaller base or
+   dropping matplotlib saves little.
 7. **Small-utility models:** a pooled multi-utility model with utility-level features, gated per utility.
 8. **No CI pipeline** (out of scope per the brief). `docker compose --profile test run --rm test` is the CI step.
 9. **The MLflow server image** pins pip versions but not hashes. The compose credentials are local-only placeholders.
@@ -422,22 +452,38 @@ SageMaker fact below was checked against the AWS documentation, and every price 
     pinning `mlflow-skinny` 3.10.x plus `sagemaker-mlflow` and re-running the tests (the image still uses
     3.16.1); the pipeline definitions, the dispatcher and retry Lambdas, and the quota increases. DESIGN.md
     describes the target, not what runs today.
+11. **One Postgres locally:** in the compose stack MLflow and job status share one Postgres server, so a
+    database outage takes both down. In the SageMaker design they are separate (MLflow App and RDS).
+12. **Gate tag shows only the latest decision:** a version's `gate_decision` tag is overwritten, so v1 now
+    reads `MANUAL_PROMOTION` after the rollback test. The full history is in the gate runs.
+13. **Registry retention:** every training registers a version, even a rejected one; v3 to v6 in the hand test
+    were rejected ties. The registry needs a retention policy for rejected candidates.
 
 ---
 
 ## 6. AI usage
 
-I used Claude (Anthropic) as a pair-programmer throughout:
-- **Review:** it ran the untouched pipeline and reproduction scripts with me. I checked every finding against the code
-  and kept only what reproduced (for example, the stale-features SUCCESS run and the `elapsed` NameError).
-- **Implementation:** drafted with Claude in small commits.
-  I reviewed every diff, ran the tests and the end-to-end flows, and made the design calls (score vs train
-  split, the gate rules, spatial holdout, failure policy, the SageMaker/Fargate hybrid).
-- **SageMaker design:** Claude checked each SageMaker claim in DESIGN.md against the AWS documentation and took prices
-  from the AWS Price List API. That check is why the registry is an MLflow App rather than a tracking server (3.0
-  cannot write skops models).
-- **Verification without a Docker daemon** (in Claude's sandbox): the builder step was reproduced with
-  `uv sync --frozen --no-dev --no-editable`. The prod-like profile was run natively against Postgres 16, a moto
-  S3+SQS server and an MLflow server on Postgres. I then ran the compose profiles on my machine.
-- Where AI output was wrong or risky, I changed it. For example, strict mode broke on `~/.bashrc`, and MLflow 3.16
-  rejected skops' untrusted types until the reviewed list was added.
+I used Claude (Claude Code) as a pair-programmer for most of the implementation. It drafted code and proposed approaches. I reviewed every change, decided which alternatives to keep, ran the system on my machine, broke it on purpose (killed workers mid-job, fed it broken exports and wrong units, rolled models back) and fixed or extended what didn’t hold up, including the cross-fitted scoring, the num_breaks_5yr ablation, crash detection and the SageMaker design. Claude also checked SageMaker facts against the AWS documentation and prices against the AWS Price List.
+
+---
+
+## 7. What I verified by hand
+
+Docker 28.0.4, Compose v2.34, on my laptop, 10 and 12 October.
+
+- **Test image:** 79 passed, 1 skipped (the Postgres test), on both days.
+- **No champion yet:** `job-20261012-094204-119631` failed at once (`FAILED`, attempt 1, no retries) and is in the DLQ
+  with “no ‘champion’ model”.
+- **Train:** v1 `PROMOTED` (holdout AP 0.495 vs age rule 0.429, spatial CV 0.523). Retraining unchanged data: v2
+  `REJECTED`, “AP improvement over champion +0.0000 < 0.005”.
+- **Worker killed mid-train** with `docker kill` (`job-20261010-123123-074199` and `job-20261012-095225-393592`): the
+  next delivery recorded `PREVIOUS_ATTEMPT_LOST`, attempt 2 skipped prepare and succeeded.
+- **Injected transient fault** (`job-20261012-094430-353260`): `RETRYING`, then attempt 2 skipped prepare and `SUCCEEDED`.
+- **Broken export** (brokenville, `job-20261012-094438-848436`): `FAILED` immediately, in the DLQ with “missing required
+  columns: [‘material’]”.
+- **Changed input** (job `input-check`): the first run executed prepare and predict, the second skipped both, and after
+  changing one pipe’s length both ran again.
+- **Rollback:** manually promoted v2 (“rollback test”), a score job (`rollback-check`) used v2, then restored v1. Both
+  promotions are recorded as gate runs with actor and reason.
+- **Wrong units** (diameters converted to inches): prepare refused it, “diameter_mm: 2877 of 2984 values (96.4%) outside
+  [20, 3000], median 5.9 … inches”, exit code 2, no retry.

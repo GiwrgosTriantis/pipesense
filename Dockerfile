@@ -52,6 +52,7 @@ ENV PATH=/opt/venv/bin:$PATH \
     MPLCONFIGDIR=/tmp/matplotlib \
     MLFLOW_DISABLE_TELEMETRY=true \
     MLFLOW_DISABLE_AGENT_HINT=1 \
+    GIT_PYTHON_REFRESH=quiet \
     PIPESENSE_PIPELINE_CONFIG=/app/config/pipeline.toml \
     PIPESENSE_GIT_SHA=${GIT_SHA} \
     PIPESENSE_IMAGE_TAG=${IMAGE_TAG}
