@@ -220,10 +220,12 @@ The brief says not to ask, so each of these is a decision I would confirm with t
   `runs/<utility>/<job_id>/<stage>/` and commits with `_SUCCESS.json`. I considered Airflow (I run it in production),
   a broker between stages and Step Functions. For a two-stage job, an orchestrator adds a service to run and
   buys nothing the markers don't already give.
-- **Resume after failure:** a stage is skipped when its marker's fingerprint matches. The fingerprint is
-  a sha256 of the pipeline version, the stage's config section, the checksums of its raw inputs and the
+- **Resume after failure:** a stage is skipped when its marker's fingerprint matches. The fingerprint is a
+  sha256 of the pipeline version, the config sections the stage reads, the checksums of its raw inputs and the
   upstream fingerprints. Writing the marker last makes it the commit point: partial output is simply
-  overwritten. A changed input re-runs exactly the affected stages. Tests: `test_resume_after_failure_skips_finished_stages`,
+  overwritten. A changed raw export reruns `prepare` and everything downstream, and a changed config section
+  reruns the stages that read it and everything downstream. Tests:
+  `test_resume_after_failure_skips_finished_stages`,
   `test_changed_raw_data_invalidates_prepare_and_downstream`, and the worker retry test.
 - **Moving to another orchestrator without a rewrite:** stages are functions of a `StageContext` (utility, job_id,
   config, storage). They read no environment variables and use no globals or fixed paths. `pipesense stage <name> --job-id …` runs one
@@ -235,10 +237,11 @@ The brief says not to ask, so each of these is a decision I would confirm with t
 - **Image versioning:** each image is tagged with its git SHA and carries OCI labels. `PIPESENSE_GIT_SHA` and `PIPESENSE_IMAGE_TAG` are written
   into every marker, model version and prediction manifest. Base images are pinned by digest. In AWS, ECR
   tags are immutable and deploys reference the digest.
-- **A bad image in production:** roll back by redeploying the previous tag (in ECS, the previous task definition
-  revision). Then find the affected outputs by the `image_tag` in their markers and manifests, and re-run those jobs
-  with `--force`. Markers do **not** include the image tag on purpose: otherwise every deploy would invalidate
-  every cached stage. When stage logic changes meaning, `[pipeline].version` is bumped instead.
+- **A bad image in production:** roll back by redeploying the previous tag: in ECS the previous task
+  definition revision, and on SageMaker the `score` and `train` pipelines repointed at the previous image
+  digest. Then find the affected outputs by the `image_tag` in their markers and manifests, and re-run those
+  jobs with `--force`. Markers do **not** include the image tag on purpose: otherwise every deploy would
+  invalidate every cached stage. When stage logic changes meaning, `[pipeline].version` is bumped instead.
 - **Tests in the image:** `docker compose --profile test run --rm test` runs pytest in the `test` target,
   which is the runtime image plus dev dependencies and tests.
 
