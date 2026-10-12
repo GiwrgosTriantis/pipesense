@@ -98,6 +98,7 @@ services:
     profiles: [prod]
     build: deploy/mlflow
     image: pipesense-mlflow:3.16.1
+    pull_policy: build
     command: >-
       mlflow server --host 0.0.0.0 --port 5000
       --backend-store-uri postgresql+psycopg2://pipesense:local-only@postgres:5432/mlflow
